@@ -1,6 +1,10 @@
 # dm-other-claudes
 
-Send tasks between Claude Code instances on different machines over SSH. Claude-to-Claude collaboration with session continuity.
+Let your main Claude Code instance communicate with remote Claude Code instances over SSH. Instead of copying messages back and forth between terminal windows, your Claudes can just talk to each other directly.
+
+Born from the annoyance of manually relaying messages between Claude Code sessions on different servers. Each Claude knows its own machine best — now they can collaborate without you playing telephone.
+
+> This is just how my system is set up. Feel free to fork, improve, and personalize it for yourself.
 
 ```
 ┌─────────────────┐         SSH + stdin          ┌─────────────────┐
