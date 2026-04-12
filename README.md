@@ -1,4 +1,4 @@
-# dm-with-claude
+# dm-other-claudes
 
 Send tasks between Claude Code instances on different machines over SSH. Claude-to-Claude collaboration with session continuity.
 
