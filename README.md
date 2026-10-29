@@ -128,6 +128,14 @@ For new conversations, a preamble is prepended explaining to the remote Claude t
 - **Output:** every remote-derived string (reply, stderr, error subtype) is stripped of ANSI escapes, C0/C1 control characters, lone surrogates, and characters a human cannot see but a model can read: soft hyphen, Arabic letter mark, zero-width space, line/paragraph separators, bidi embeddings, overrides and isolates, word joiner and invisible operators, BOM, interlinear annotation, and the Unicode tag block (the "ASCII smuggling" channel). Every logged line is prefixed with `[dm-claude]`, so multi-line remote text cannot forge a status line such as `session_id:`. **Not stripped, on purpose:** ZWNJ/ZWJ (Persian, Indic scripts, emoji sequences), LRM/RLM (mixed-direction text) and variation selectors (emoji presentation, CJK) are needed by legitimate text, so they remain a possible covert channel. Plain-text prompt injection cannot be filtered at all: treat replies as untrusted data.
 - **`--skip-permissions`** is full shell access as the remote user. Use it only on hosts and tasks you trust, and don't pass untrusted content into such prompts. Remote replies are untrusted data.
 
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Offline, standard library only, under half a minute. The unit tests cover the input validators, the output sanitizer, `log()`, the remote command builder and the reply parser. The integration tests put a fake `ssh` (which runs the command string in a local shell, as the remote would; every one of `sh`, `dash`, `bash`, `zsh` and `ksh` that is installed gets a turn as the remote login shell, because they differ in what this script relies on) and a fake `claude` first on `PATH`, then check the normal round trip, the timeout kill of the whole process tree, that a pre-planted FIFO, symlink or directory at the run-directory name is refused, and that hostile pid-file contents are handled safely. Nothing touches the network; the tests write only to a temp directory and to `/tmp/dm-claude-<random>/`.
+
 ## Tips
 
 - **Use IP addresses** if hostname resolution is flaky on your network
