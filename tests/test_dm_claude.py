@@ -54,11 +54,25 @@ def parse(*argv):
 
 
 def remote_shells():
-    """Distinct shells to play the remote login shell. They differ in what this script
-    relies on: dash and bash exit when `exec 3<file` fails, zsh and ksh truncate the
+    """Distinct POSIX-ish interpreters to play the remote's /bin/sh. They differ in what this
+    script relies on: dash and bash exit when `exec 3<file` fails, zsh and ksh truncate the
     argument of `kill` to 32 bits."""
     seen, found = set(), []
     for path in ("/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/ksh", "/usr/bin/ksh"):
+        real = os.path.realpath(path)
+        if os.path.exists(path) and real not in seen:
+            seen.add(real)
+            found.append(path)
+    return found
+
+
+def login_shells():
+    """Shells that may be the remote *login* shell, which is what ssh hands the command string
+    to. csh and tcsh (FreeBSD, TrueNAS, OPNsense) and fish do not speak POSIX sh, so the
+    command must reduce to `/bin/sh -c '<script>'`."""
+    seen, found = set(), []
+    for path in ("/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/csh", "/usr/bin/csh",
+                 "/bin/tcsh", "/usr/bin/tcsh", "/usr/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish"):
         real = os.path.realpath(path)
         if os.path.exists(path) and real not in seen:
             seen.add(real)
@@ -283,32 +297,38 @@ while [ $# -gt 0 ]; do
   case "$1" in --) shift; break;; -o) shift 2;; *) shift;; esac
 done
 shift   # target
+cmd="$*"
+# FAKE_BIN_SH: which interpreter plays the remote's /bin/sh (the script runs in it, whatever
+# the login shell is)
+if [ -n "$FAKE_BIN_SH" ]; then
+  case "$cmd" in "/bin/sh -c "*) cmd="$FAKE_BIN_SH -c ${cmd#/bin/sh -c }";; esac
+fi
 # FAKE_VANISH_PROMPT: delete this run's prompt just before phase 2 opens it
 if [ -n "$FAKE_VANISH_PROMPT" ]; then
-  case "$*" in *"exec 3< "*)
-    rm -f "$(printf '%s' "$*" | sed -n 's/.*exec 3< \\([^ ]*\\) .*/\\1/p')";;
+  case "$cmd" in *"exec 3< "*)
+    rm -f "$(printf '%s' "$cmd" | sed -n 's/.*exec 3< \\([^ ]*\\) .*/\\1/p')";;
   esac
 fi
-[ -n "$FAKE_SSH_LOG" ] && printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
+[ -n "$FAKE_SSH_LOG" ] && printf '%s\\n' "$cmd" >> "$FAKE_SSH_LOG"
 # FAKE_SSH_SLOW_CLEANUP: the kill/cleanup connection takes a while (window for a second signal)
 if [ -n "$FAKE_SSH_SLOW_CLEANUP" ]; then
-  case "$*" in *"kt()"*) sleep "$FAKE_SSH_SLOW_CLEANUP";; esac
+  case "$cmd" in *"kt()"*) sleep "$FAKE_SSH_SLOW_CLEANUP";; esac
 fi
 # FAKE_SSH_DROP=run: the link dies after claude started; the remote keeps running (as with
 # a real dropped connection) and ssh itself exits 255. FAKE_SSH_DROP=upload: the same right
 # after the upload, when the remote `cat` has already finished.
-case "$FAKE_SSH_DROP:$*" in
+case "$FAKE_SSH_DROP:$cmd" in
   run:*"exec 3< "*)
-    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0 >/dev/null 2>&1 &
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0 >/dev/null 2>&1 &
     i=0; while [ ! -s "$FAKE_STATE/child.pid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
     echo "Connection to host closed by remote host." >&2
     exit 255;;
   upload:*"mkdir "*)
-    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0
     echo "client_loop: send disconnect: Broken pipe" >&2
     exit 255;;
 esac
-"${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0 &
+"${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0 &
 wait $!
 """
     FAKE_CLAUDE = """#!/bin/sh
@@ -434,13 +454,31 @@ esac
         return p.returncode, err
 
     def test_roundtrip_and_cleanup(self):
-        for shell in remote_shells():
-            with self.subTest(shell=shell):
-                r = self.run_script("-v", "me@host", "hello", FAKE_REMOTE_SH=shell)
+        for env in ([{"FAKE_BIN_SH": sh} for sh in remote_shells()]
+                    + [{"FAKE_REMOTE_SH": login} for login in login_shells()]):
+            with self.subTest(**env):
+                r = self.run_script("-v", "me@host", "hello", **env)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertIn("got hello", r.stdout)
                 self.assertIn("session_id: abc123", r.stderr)
                 self.assertNoRemoteFiles(r.stderr)
+
+    def test_every_remote_command_is_one_posix_sh_word(self):
+        # ssh gives the string to the login shell. csh/tcsh expand `!` even inside single
+        # quotes, and none of csh, tcsh or fish parse `$(...)`, `name() {}` or `exec 3<`: the
+        # only thing the login shell may see is `/bin/sh -c '<script>'` with no `!` in it.
+        self.run_script("-v", "-t", "60", "-s", "abc", "--remote-env", "CLAUDE_CONFIG_DIR=/a b/c'd",
+                        "me@host", "hi")
+        self.run_script("-t", "2", "me@host", "slow", mode="sleep")        # timeout: the kill script
+        with open(self.env["FAKE_SSH_LOG"]) as f:
+            commands = f.read().splitlines()
+        self.assertGreaterEqual(len(commands), 4)
+        for command in commands:
+            with self.subTest(command=command[:60]):
+                self.assertTrue(command.startswith("/bin/sh -c '"), command)
+                self.assertNotIn("!", command)
+                self.assertEqual(shlex.split(command)[:2], ["/bin/sh", "-c"])
+                self.assertEqual(len(shlex.split(command)), 3)
 
     def test_timeout_kills_the_whole_tree(self):
         r = self.run_script("-v", "-t", "2", "me@host", "slow", mode="sleep")
@@ -486,9 +524,9 @@ esac
     def test_failure_after_upload_leaves_no_files_on_the_remote(self):
         # The prompt is gone when phase 2 opens it. dash and bash exit on that redirection
         # error, so the EXIT trap must already be armed or the pid file and directory leak.
-        for shell in remote_shells():
-            with self.subTest(shell=shell):
-                r = self.run_script("-v", "me@host", "x", FAKE_VANISH_PROMPT="1", FAKE_REMOTE_SH=shell)
+        for sh in remote_shells():
+            with self.subTest(sh=sh):
+                r = self.run_script("-v", "me@host", "x", FAKE_VANISH_PROMPT="1", FAKE_BIN_SH=sh)
                 self.assertNotEqual(r.returncode, 0, r.stderr)
                 self.assertNoRemoteFiles(r.stderr)
 
@@ -680,11 +718,12 @@ esac
             code, err = self._in_process_main(run_id, "me@host", "hi")
         self.assertEqual(modes, [0o700, 0o600], err)
 
-    def cleanup_statuses(self, run_dirs, shell):
+    def cleanup_statuses(self, run_dirs, sh=None, login=None):
         """remote_cleanup(kill=True) for each directory, in a child Python in its own session.
         A broken pid guard can end up signalling a whole process group, and that must not be ours."""
         r = subprocess.run([sys.executable, "-I", "-B", "-c", self.CLEANUP_CHILD, SCRIPT, *run_dirs],
-                           env=dict(self.env, FAKE_REMOTE_SH=shell), capture_output=True, text=True,
+                           env=dict(self.env, **{k: v for k, v in (("FAKE_BIN_SH", sh), ("FAKE_REMOTE_SH", login)) if v}),
+                           capture_output=True, text=True,
                            timeout=60, start_new_session=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
@@ -703,23 +742,34 @@ esac
         marker = os.path.join(self.tmp, "pwned")
         hostile = ["-1", "12 34", "1", "0", "", "abc", "00012", f"0{canary.pid}",
                    "123456789",                     # 9 digits
+                   "12\n34", "12\r",               # a newline hides inside `$(...)` and test(1)
                    "4294967296", "4294967297",      # 2**32 and 2**32+1: zsh/ksh read them as 0 and 1
                    f"{canary.pid}; touch {marker}", f"$(touch {marker})", f"{canary.pid} {canary.pid}"]
-        for shell in remote_shells():
-            with self.subTest(shell=shell):
+        for sh in remote_shells():
+            with self.subTest(sh=sh):
                 run_dirs = [self.new_run_dir(content) for content in hostile]
-                statuses = self.cleanup_statuses(run_dirs, shell)
+                statuses = self.cleanup_statuses(run_dirs, sh=sh)
                 self.assertEqual(dict(zip(hostile, statuses)), {c: ["no-pid"] for c in hostile})
                 self.assertIsNone(canary.poll(), "canary was signalled")
                 self.assertFalse(os.path.exists(marker), "injected command ran")
                 self.assertEqual([d for d in run_dirs if os.path.lexists(d)], [], "run directory not removed")
         gone = subprocess.Popen(["true"])
         gone.wait()                 # a plain number, but nothing runs under it any more
-        [status] = self.cleanup_statuses([self.new_run_dir(str(gone.pid))], remote_shells()[0])
+        [status] = self.cleanup_statuses([self.new_run_dir(str(gone.pid))], sh=remote_shells()[0])
         self.assertEqual(status, ["no-pid"])
-        [status] = self.cleanup_statuses([self.new_run_dir(str(canary.pid))], remote_shells()[0])
+        [status] = self.cleanup_statuses([self.new_run_dir(str(canary.pid))], sh=remote_shells()[0])
         self.assertIn("killed", status)
         self.assertIsNotNone(canary.wait(timeout=5))
+
+    def test_kill_script_survives_every_login_shell(self):
+        # The kill script has `!`-free quoting, `$(...)` and a function: it must reach sh intact
+        for login in login_shells():
+            with self.subTest(login=login):
+                victim = subprocess.Popen(["sleep", "60"])
+                self.addCleanup(victim.kill)
+                [status] = self.cleanup_statuses([self.new_run_dir(str(victim.pid))], login=login)
+                self.assertIn("killed", status)
+                self.assertIsNotNone(victim.wait(timeout=5))
 
 
 if __name__ == "__main__":

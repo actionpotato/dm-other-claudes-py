@@ -257,6 +257,16 @@ def try_parse_result(text):
         return None
 
 
+def remote_sh(script):
+    """The string ssh hands to the remote *login* shell for a POSIX-sh script.
+
+    The login shell may be csh or tcsh (FreeBSD, TrueNAS, OPNsense), fish, or anything else,
+    and none of those parse `$(...)`, `name() { ...; }`, `exec 3< file` or `trap ... EXIT`.
+    Every one of them can run `/bin/sh -c '<one single-quoted word>'`, and sh then runs the
+    script. csh and tcsh expand `!` even inside single quotes, so the scripts avoid it."""
+    return f"/bin/sh -c {shlex.quote(script)}"
+
+
 def remote_cleanup(target, run_dir, kill):
     """Best-effort remote cleanup over a fresh ssh; returns the set of status words
     the remote script printed, or None if it could not be reached / timed out.
@@ -273,8 +283,11 @@ def remote_cleanup(target, run_dir, kill):
             f"p=$(cat {run_dir}/pid 2>/dev/null); "
             # Reject empty, leading-zero, non-digit and 9+ digit values. Linux pids have
             # at most 7 digits; zsh and ksh truncate kill's argument to 32 bits, so
-            # "4294967296" would become 0, i.e. our own process group.
-            'case $p in ""|0*|*[!0-9]*|?????????*) p=;; esac; '
+            # "4294967296" would become 0, i.e. our own process group. "Non-digit" is tested
+            # by deleting everything but digits and comparing (a `[!0-9]` pattern would be
+            # simpler, but csh and tcsh expand `!` even inside single quotes).
+            'case $p in ""|0*|?????????*) p=;; esac; '
+            '[ "$(printf %s "$p" | LC_ALL=C tr -cd 0-9 2>/dev/null)" = "$p" ] || p=; '
             'if [ -n "$p" ] && [ "$p" -gt 1 ] && kill -0 "$p" 2>/dev/null; then '
             'command -v pgrep >/dev/null 2>&1 || echo no-pgrep; kt "$p"; echo killed; '
             'else echo no-pid; fi; ' + script
@@ -282,7 +295,7 @@ def remote_cleanup(target, run_dir, kill):
     try:
         r = subprocess.run(
             SSH_BASE + ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-                        "--", target, script],
+                        "--", target, remote_sh(script)],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
@@ -402,9 +415,9 @@ def main():
     # Phase 1: upload prompt
     try:
         up = subprocess.run(
-            SSH_BASE + ["--", target,
-                        f"umask 077; mkdir {run_dir} || exit 1; "
-                        f"cat > {tmp_file} || {{ rm -f {tmp_file}; rmdir {run_dir}; exit 1; }}"],
+            SSH_BASE + ["--", target, remote_sh(
+                f"umask 077; mkdir {run_dir} || exit 1; "
+                f"cat > {tmp_file} || {{ rm -f {tmp_file}; rmdir {run_dir}; exit 1; }}")],
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=60,
@@ -439,10 +452,11 @@ def main():
         # the prompt and unlink it immediately so it never lingers. The shell stays
         # as claude's parent so the EXIT trap fires; on timeout remote_cleanup()
         # walks its children.
-        f"umask 077; trap 'rm -f {tmp_file} {pid_file}; rmdir {run_dir} 2>/dev/null' EXIT; "
-        f"echo $$ > {pid_file} || exit 1; "
-        f"exec 3< {tmp_file} || exit 1; rm -f {tmp_file}; "
-        f"{remote_cmd} <&3 3<&-",
+        remote_sh(
+            f"umask 077; trap 'rm -f {tmp_file} {pid_file}; rmdir {run_dir} 2>/dev/null' EXIT; "
+            f"echo $$ > {pid_file} || exit 1; "
+            f"exec 3< {tmp_file} || exit 1; rm -f {tmp_file}; "
+            f"{remote_cmd} <&3 3<&-"),
     ]
     try:
         run = subprocess.run(run_cmd, stdin=subprocess.DEVNULL,
