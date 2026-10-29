@@ -93,8 +93,21 @@ ENV_DENY_RE = re.compile(r"^(LD_.*|DYLD_.*|BASH_ENV|ENV|IFS|SHELLOPTS|BASHOPTS|P
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
 # Remote output is untrusted: drop ANSI escapes and control characters
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
-# includes \r, C1 controls (8-bit CSI etc.) and Unicode bidi overrides, which can spoof output
-CTRL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+# Control and invisible characters. Beyond C0/C1 controls (incl. \r and 8-bit CSI)
+# this strips characters a human cannot see but a model can read, so a reply
+# cannot smuggle instructions past the person watching the terminal: soft hyphen,
+# ALM, zero-width space, line and paragraph separators, bidi embeddings, overrides
+# and isolates, word joiner & invisible operators, BOM, interlinear annotation, the
+# Unicode tag block (U+E0000-E007F, the "ASCII smuggling" channel), and lone
+# surrogates (which would make print() raise UnicodeEncodeError).
+# Deliberately NOT stripped, because legitimate text needs them: ZWNJ / ZWJ
+# (Persian, Indic scripts, emoji sequences), LRM / RLM (mixed-direction text) and
+# variation selectors (emoji presentation, CJK). They remain a possible covert
+# channel; see README "Security notes".
+CTRL_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b\u2028-\u202e"
+    "\u2060-\u206f\ufeff\ufff9-\ufffb\ud800-\udfff\U000e0000-\U000e007f]"
+)
 
 
 def sanitize(text):
@@ -102,7 +115,10 @@ def sanitize(text):
 
 
 def log(msg):
-    print(f"[dm-claude] {msg}", file=sys.stderr)
+    # Prefix every line, so a multi-line message (e.g. remote stderr) cannot
+    # contain a line that looks like one of our own status lines.
+    for line in str(msg).splitlines() or [""]:
+        print(f"[dm-claude] {line}", file=sys.stderr)
 
 
 def positive_int(v):
@@ -324,7 +340,7 @@ def main():
 
     print(sanitize(str(result)))
     if is_error:
-        log(f"remote claude reported an error ({parsed.get('subtype', 'unknown')})")
+        log(f"remote claude reported an error ({sanitize(str(parsed.get('subtype', 'unknown')))})")
         sys.exit(1)
 
 
