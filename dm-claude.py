@@ -120,6 +120,17 @@ def sanitize(text):
     return CTRL_RE.sub("", ANSI_RE.sub("", text))
 
 
+# A reply line that starts with our log prefix could pose as one of our status lines
+# (session_id:, continue:) once stdout and stderr are shown interleaved, as the Bash tool
+# and `2>&1` do. Log lines are all prefixed, so only reply lines need this.
+REPLY_PREFIX_RE = re.compile(r"^([ \t]*)\[dm-claude\]", re.MULTILINE)
+
+
+def reply_text(text):
+    """Remote text for stdout: sanitized, and no line of it starts with `[dm-claude]`."""
+    return REPLY_PREFIX_RE.sub(r"\1(dm-claude)", sanitize(text))
+
+
 def log(msg):
     # Prefix every line, so a multi-line message (e.g. remote stderr) cannot
     # contain a line that looks like one of our own status lines.
@@ -466,7 +477,7 @@ def main():
     parsed = try_parse_result(stdout)
     if not parsed:
         log("warning: could not parse JSON, raw output follows")
-        print(sanitize(stdout))
+        print(reply_text(stdout))
         if run.returncode != 0:
             log(f"remote command exited {run.returncode}")
             if stderr.strip() and not args.verbose:  # -v already showed it
@@ -502,7 +513,7 @@ def main():
         except OverflowError:   # an integer too big for a float: the reply is not ours to trust
             log("cost/time not shown: numbers in the reply are out of range")
 
-    print(sanitize(str(result)))
+    print(reply_text(str(result)))
     if is_error:
         log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
         sys.exit(1)
