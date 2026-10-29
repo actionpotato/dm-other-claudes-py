@@ -1,4 +1,4 @@
-# dm-other-claudes
+# dm-other-claudes-py
 
 Let your main Claude Code instance communicate with remote Claude Code instances over SSH. Instead of copying messages back and forth between terminal windows, your Claudes can just talk to each other directly.
 
