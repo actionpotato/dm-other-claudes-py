@@ -81,13 +81,14 @@ exit status:
   1      an argument refused by our own checks, the upload failed, or the remote claude
          reported an error or printed nothing
   2      the command line was not understood (unknown flag, bad number)
-  124    timed out (-t); the remote claude was sent SIGTERM
-  130    interrupted with Ctrl-C; the remote claude was sent SIGTERM
-  129, 143   killed by SIGHUP / SIGTERM (128 + signal); the remote claude was sent SIGTERM
+  124    timed out (-t); SIGTERM is sent to the remote claude (best effort; the log says what was found)
+  130    interrupted with Ctrl-C; SIGTERM is sent to the remote claude (best effort; the log says what was found)
+  129, 143   killed by SIGHUP / SIGTERM (128 + signal); SIGTERM is sent to the remote claude (best effort; the log says what was found)
   255    ssh itself failed (connection lost, host key changed, killed by a signal, ...);
-         the remote claude was sent SIGTERM
-  other  the remote command's own status (127: claude not found on the remote's PATH);
-         one that equals a code above cannot be told apart from it
+         SIGTERM is sent to the remote claude (best effort; the log says what was found)
+  other  the remote command's own status (127: claude not found on the remote's PATH;
+         120: python could not flush stdout); one that equals a code above cannot be
+         told apart from it
 """
 
 # accept-new trusts a host on first contact but refuses if its key later changes
@@ -202,7 +203,7 @@ def parse_args():
     p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VALUE",
                    help="Set an environment variable for remote claude (repeatable); only "
                         "allow-listed names are accepted, currently CLAUDE_CONFIG_DIR "
-                        "(e.g. CLAUDE_CONFIG_DIR=/config/.claude-ssh)")
+                        "(e.g. CLAUDE_CONFIG_DIR=/config/.claude-ssh); the value must be a plain path")
     p.add_argument("-v", "--verbose", action="store_true", help="Show debug info")
     p.add_argument("target", nargs="?", help="user@host")
     p.add_argument("prompt", nargs="*", help="prompt text")
@@ -474,11 +475,15 @@ def main():
         remote_cleanup(target, run_dir, kill=False)
         sys.exit(interrupt_exit_code(e))
     if up.returncode != 0:
-        log(f"SSH connection failed: {sanitize(up.stderr.decode(errors='replace')).strip()}")
-        if up.returncode == 255:
-            # ssh itself failed, possibly after the remote `cat` finished: don't leave the
-            # prompt behind. (Exit 1 is the remote script's own: it cleaned up, or mkdir
-            # refused a name that is not ours to touch.)
+        detail = sanitize(up.stderr.decode(errors="replace")).strip()
+        if up.returncode < 0:
+            detail = f"ssh was killed by signal {-up.returncode}" + (f": {detail}" if detail else "")
+        log(f"SSH connection failed: {detail}")
+        if up.returncode != 1:
+            # ssh itself failed (255), was killed, or ended with some other status, possibly
+            # after the remote `cat` finished: don't leave the prompt behind. (Exit 1 is the
+            # remote script's own: it cleaned up, or mkdir refused a name that is not ours
+            # to touch.)
             end_at_next_signal()
             remote_cleanup(target, run_dir, kill=False)
         sys.exit(1)
@@ -527,9 +532,7 @@ def main():
     if args.verbose and stderr:
         log(f"stderr:\n{stderr}")
 
-    if rc != 0 and not stdout.strip():
-        log(f"FAILED (exit {rc}): {stderr.strip()}")
-        explain_exit(rc)
+    def clean_up_after_failure():
         if rc == 255:
             # ssh itself failed (e.g. the link dropped after the upload) and claude may well
             # still be running over there with nobody to read its answer: stop it, and
@@ -539,11 +542,15 @@ def main():
             # The remote script's own EXIT trap cleans up when it ran at all. If the login
             # shell rejected the command it never did, and the prompt is still over there.
             remote_cleanup(target, run_dir, kill=False)
+
+    if rc != 0 and not stdout.strip():
+        log(f"FAILED (exit {rc}): {stderr.strip()}")
+        explain_exit(rc)
+        clean_up_after_failure()
         sys.exit(rc)
-    if rc == 255:
-        # Output arrived first (a login banner, part of a reply), but the connection still
-        # died: the same stranded remote claude.
-        kill_remote(target, run_dir)
+    if rc != 0:
+        # Output arrived first (a login banner, part of a reply) and the command still failed.
+        clean_up_after_failure()
     if not stdout.strip():
         # Only exit 0 gets here: the remote command succeeded and said nothing.
         log("the remote command exited 0 but printed nothing"

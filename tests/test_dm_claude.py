@@ -88,6 +88,10 @@ class HelpTests(unittest.TestCase):
                 self.assertRegex(section, rf"(?m)^  (?:\d+, )*{code}\b")      # a row of the table
         self.assertIn("127", section)
 
+    def test_help_states_the_remote_env_value_rule(self):
+        r = subprocess.run([sys.executable, "-I", "-B", SCRIPT, "--help"], capture_output=True, text=True)
+        self.assertIn("plain path", " ".join(r.stdout.split()))
+
     def test_usage_errors_exit_2_as_documented(self):
         for argv in (("-t", "0", "u@h", "p"), ("--no-such-flag", "u@h", "p")):
             with self.subTest(argv=argv):
@@ -381,6 +385,7 @@ fi
 # reached stdout first. runkilled: ssh is killed by a signal instead of exiting. runfail: the
 # remote login shell rejects the command (csh: "Event not found") and nothing runs there.
 # FAKE_SSH_DROP=upload: the link dies right after the upload, when the remote `cat` has finished.
+# uploadkilled / uploadexit: the same, but ssh is killed by a signal / exits 137 instead.
 case "$FAKE_SSH_DROP:$cmd" in
   run:*"exec 3< "*|runbanner:*"exec 3< "*|runkilled:*"exec 3< "*)
     "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0 >/dev/null 2>&1 &
@@ -396,6 +401,12 @@ case "$FAKE_SSH_DROP:$cmd" in
     "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0
     echo "client_loop: send disconnect: Broken pipe" >&2
     exit 255;;
+  uploadkilled:*"mkdir "*)         # the upload finished, then ssh was killed by a signal
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0
+    kill -9 $$;;
+  uploadexit:*"mkdir "*)           # ... or ended with some other status (here: 128 + SIGKILL)
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0
+    exit 137;;
 esac
 "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0 &
 wait $!
@@ -510,14 +521,22 @@ esac
         p = subprocess.Popen(
             [*prefix, sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, *args],
             cwd=self.tmp, env=dict(self.env, FAKE_MODE=mode, **extra_env),
-            stdout=subprocess.PIPE, stderr=stderr, text=True)
+            stdout=subprocess.PIPE, stderr=stderr, text=True, start_new_session=True)
         self.addCleanup(p.kill)
+        # A run that was signalled leaves its cleanup ssh (and the fake's sleep) behind, as the
+        # real one would: reap the whole group so nothing outlives the test.
+        self.addCleanup(self._kill_group, p.pid)
         path = os.path.join(self.tmp, marker)
         deadline = time.time() + 15
         while not os.path.exists(path) and time.time() < deadline:
             time.sleep(0.05)
         self.assertTrue(os.path.exists(path), "fake claude never started")
         return p
+
+    @staticmethod
+    def _kill_group(pgid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
 
     def run_and_signal(self, signum):
         """Start a slow run, deliver `signum` to the script once the fake claude is up."""
@@ -827,6 +846,22 @@ esac
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("Event not found", r.stderr)
         self.assertNoRemoteFiles(r.stderr)
+
+    def test_a_failure_before_the_remote_script_starts_leaves_no_prompt_even_after_a_banner(self):
+        # The same login-shell rejection, but something reached stdout first: the cleanup must
+        # not depend on stdout being empty.
+        r = self.run_script("-v", "me@host", "x", FAKE_SSH_DROP="runfail",
+                            FAKE_SSH_BANNER="Welcome to the box (login banner)")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertNoRemoteFiles(r.stderr)
+
+    def test_an_upload_that_ends_in_a_signal_or_an_odd_status_leaves_no_prompt(self):
+        for drop, expected in (("uploadkilled", "killed by signal"), ("uploadexit", "SSH connection failed")):
+            with self.subTest(drop=drop):
+                r = self.run_script("-v", "me@host", "x", FAKE_SSH_DROP=drop)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn(expected, r.stderr)
+                self.assertNoRemoteFiles(r.stderr)
 
     def test_a_run_that_printed_nothing_is_not_success(self):
         r = self.run_script("me@host", "x", mode="silent")
