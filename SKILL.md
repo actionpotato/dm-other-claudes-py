@@ -89,7 +89,7 @@ python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@s
 |------|-------------|
 | `-s, --session <id>` | Resume a previous session on the remote |
 | `-t, --timeout <sec>` | Timeout in seconds (default: 600 / 10min) |
-| `-f, --file <path>` | Read prompt from a file |
+| `-f, --file <path>` | Read prompt from a file (`-` for standard input, e.g. a quoted heredoc, which avoids shell-quoting a long or multi-line prompt) |
 | `--skip-permissions` | Add `--dangerously-skip-permissions` on remote (opt-in: gives the remote Claude unrestricted shell access, see Important Notes) |
 | `--max-turns <n>` | Limit how many tool-use turns the remote Claude can take |
 | `--model <model>` | Override the remote Claude's model |

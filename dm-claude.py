@@ -68,6 +68,11 @@ examples:
   # tasks you have approved on that host)
   dm-claude.py --skip-permissions user@myserver "pull latest code and redeploy"
 
+  # A long prompt, without shell quoting
+  dm-claude.py -f - user@myserver <<'EOF'
+  ...as many lines as you like...
+  EOF
+
   # Long-running task with generous timeout
   dm-claude.py -t 1200 user@myserver "run the full test suite and summarise failures"
 """
@@ -164,7 +169,8 @@ def parse_args():
     p.add_argument("-s", "--session", help="Resume a previous session")
     p.add_argument("-t", "--timeout", type=positive_int, default=DEFAULT_TIMEOUT,
                    help=f"SSH/command timeout in seconds (default: {DEFAULT_TIMEOUT})")
-    p.add_argument("-f", "--file", dest="prompt_file", help="Read prompt from file")
+    p.add_argument("-f", "--file", dest="prompt_file", metavar="FILE",
+                   help="Read prompt from file ('-' for standard input)")
     p.add_argument("--skip-permissions", action="store_true",
                    help="Add --dangerously-skip-permissions on remote")
     p.add_argument("--max-turns", type=positive_int, help="Limit remote Claude's tool-use turns")
@@ -209,8 +215,11 @@ def parse_args():
 def build_prompt(args):
     if args.prompt_file:
         try:
-            with open(args.prompt_file, encoding="utf-8") as f:
-                prompt = f.read()
+            if args.prompt_file == "-":     # e.g. a heredoc: no shell quoting, no argv size limit
+                prompt = sys.stdin.buffer.read().decode("utf-8")
+            else:
+                with open(args.prompt_file, encoding="utf-8") as f:
+                    prompt = f.read()
         except (OSError, UnicodeDecodeError) as e:
             log(f"Error: cannot read prompt file: {e}")
             sys.exit(1)

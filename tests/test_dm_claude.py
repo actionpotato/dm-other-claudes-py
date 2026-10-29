@@ -392,10 +392,10 @@ esac
                     os.unlink(path)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_script(self, *args, mode="ok", timeout=60, **extra_env):
+    def run_script(self, *args, mode="ok", timeout=60, input=None, **extra_env):
         env = dict(self.env, FAKE_MODE=mode, **extra_env)
         return subprocess.run([sys.executable, "-I", "-B", SCRIPT, *args], cwd=self.tmp, env=env,
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, timeout=timeout, input=input)
 
     def assertGone(self, pid, what="process"):
         deadline = time.time() + 5
@@ -501,6 +501,21 @@ esac
                 self.assertIn("remote process tree signalled", err)
                 self.assertGone(self.grandchild_pid(), "grandchild")
                 self.assertNoRemoteFiles(err)
+
+    def test_prompt_from_standard_input(self):
+        text = "line one\nline 'two' $HOME `x` \u00e9\n"
+        r = self.run_script("-f", "-", "me@host", input=text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("got line \'two\' $HOME `x` \u00e9", r.stdout)   # the fake claude echoes the last line
+        with open(self.env["FAKE_SSH_LOG"]) as f:
+            self.assertNotIn("line one", f.read(), "the prompt travels on stdin, not in the command")
+
+    def test_prompt_from_standard_input_must_be_utf8(self):
+        r = subprocess.run([sys.executable, "-I", "-B", SCRIPT, "-f", "-", "me@host"], cwd=self.tmp,
+                           env=self.env, input=b"\xff\xfe", capture_output=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(b"cannot read prompt file", r.stderr)
+        self.assertNotIn(b"Traceback", r.stderr)
 
     def test_non_json_failure_keeps_exit_status(self):
         r = self.run_script("me@host", "x", mode="plain")

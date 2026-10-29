@@ -89,8 +89,11 @@ python3 dm-claude.py -s SESSION_ID user@server "now clean up the /tmp directory"
 # Autonomous mode (remote Claude can use tools without asking)
 python3 dm-claude.py --skip-permissions user@server "deploy the latest main branch"
 
-# Read prompt from a file
+# Read prompt from a file, or from standard input (no shell quoting, no argument-size limit)
 python3 dm-claude.py -f task.md user@server
+python3 dm-claude.py -f - user@server <<'EOF'
+Check the backup job on this machine. Quote the last 20 lines of its log.
+EOF
 
 # Override model, increase timeout
 python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysis task"
@@ -102,7 +105,7 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 |------|-------------|
 | `-s, --session <id>` | Resume a previous session |
 | `-t, --timeout <sec>` | Timeout in seconds (default: 600) |
-| `-f, --file <path>` | Read prompt from file |
+| `-f, --file <path>` | Read prompt from file (`-` for standard input) |
 | `--skip-permissions` | Autonomous mode on remote (opt-in: unrestricted shell access as the remote user) |
 | `--max-turns <n>` | Limit tool-use turns |
 | `--model <model>` | Override remote model |
