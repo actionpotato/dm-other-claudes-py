@@ -543,6 +543,37 @@ esac
                 self.assertGone(self.grandchild_pid(), "grandchild")
                 self.assertEqual([d for d in self.logged_run_dirs() if os.path.lexists(d)], [])
 
+    def test_a_dropped_connection_does_not_strand_the_remote(self):
+        # ssh exits 255 while claude is still running over there: nobody will read its answer
+        r = self.run_script("-v", "-t", "60", "me@host", "x", mode="sleep", FAKE_SSH_DROP="run")
+        self.assertEqual(r.returncode, 255, r.stderr)
+        self.assertIn("remote process tree signalled", r.stderr)
+        self.assertGone(self.grandchild_pid(), "grandchild")
+        self.assertNoRemoteFiles(r.stderr)
+
+    def test_a_dropped_upload_leaves_no_prompt_behind(self):
+        r = self.run_script("-v", "me@host", "x", FAKE_SSH_DROP="upload")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("SSH connection failed", r.stderr)
+        self.assertNoRemoteFiles(r.stderr)
+
+    def test_an_upload_that_times_out_leaves_no_prompt_behind(self):
+        run_id = uuid.uuid4().hex
+        real_run, calls = subprocess.run, []
+
+        def spy(cmd, *a, **kw):
+            calls.append(cmd)
+            result = real_run(cmd, *a, **kw)
+            if len(calls) == 1:                 # the upload ran, then "timed out"
+                raise subprocess.TimeoutExpired(cmd, 60)
+            return result
+
+        with mock.patch.object(dmc.subprocess, "run", spy):
+            code, err = self._in_process_main(run_id, "me@host", "hi")
+        self.assertEqual(code, 1, err)
+        self.assertIn("upload timed out", err)
+        self.assertFalse(os.path.lexists(f"/tmp/dm-claude-{run_id}"), "prompt left on the remote")
+
     # -- in-process: pre-planted names, hostile pid-file contents ------------------------
 
     def _in_process_main(self, run_id, *argv):

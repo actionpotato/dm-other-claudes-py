@@ -388,6 +388,7 @@ def main():
         )
     except subprocess.TimeoutExpired:
         log("SSH connection failed: upload timed out")
+        remote_cleanup(target, run_dir, kill=False)     # part of the prompt may be there
         sys.exit(1)
     except (KeyboardInterrupt, Interrupted) as e:
         set_signal_handlers(signal.SIG_DFL)
@@ -396,6 +397,11 @@ def main():
         sys.exit(interrupt_exit_code(e))
     if up.returncode != 0:
         log(f"SSH connection failed: {sanitize(up.stderr.decode(errors='replace')).strip()}")
+        if up.returncode == 255:
+            # ssh itself failed, possibly after the remote `cat` finished: don't leave the
+            # prompt behind. (Exit 1 is the remote script's own: it cleaned up, or mkdir
+            # refused a name that is not ours to touch.)
+            remote_cleanup(target, run_dir, kill=False)
         sys.exit(1)
     if args.verbose:
         log(f"prompt uploaded to {target}:{tmp_file}")
@@ -439,9 +445,10 @@ def main():
         log(f"FAILED (exit {run.returncode}): {stderr.strip()}")
         explain_exit(run.returncode)
         if run.returncode == 255:
-            # ssh itself failed (e.g. the link dropped after the upload): don't leave
-            # the prompt behind in the remote /tmp.
-            remote_cleanup(target, run_dir, kill=False)
+            # ssh itself failed (e.g. the link dropped after the upload) and claude may well
+            # still be running over there with nobody to read its answer: stop it, and
+            # don't leave the prompt behind in the remote /tmp.
+            kill_remote(target, run_dir)
         sys.exit(run.returncode or 1)
 
     parsed = try_parse_result(stdout)
