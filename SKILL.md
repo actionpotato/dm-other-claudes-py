@@ -1,3 +1,8 @@
+---
+name: dm-other-claudes
+description: Send tasks to Claude Code instances on remote machines over SSH (Python, no Bun) and continue the conversation with session IDs. Use when work needs to run on another host that has its own Claude Code.
+---
+
 # dm-other-claudes — Cross-Claude Communication
 
 Send tasks to Claude Code instances on remote machines. Enables Claude-to-Claude collaboration over SSH with session continuity.
