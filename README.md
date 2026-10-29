@@ -138,6 +138,6 @@ For new conversations, a preamble is prepended explaining to the remote Claude t
 This is a derivative work with two layers of licensing:
 
 - **Upstream-derived portions** (the original design, preamble text and docs from [jthack/dm-other-claudes](https://github.com/jthack/dm-other-claudes)) remain under the **MIT license**. The notice is kept in [`LICENSE-MIT`](LICENSE-MIT).
-- **Modifications and new code** (the Python port, security hardening, and related docs) are licensed under the **GNU General Public License, version 2 only** (`GPL-2.0-only`). See [`COPYING`](COPYING). Not "or later".
+- **Modifications and new code** (Copyright (c) 2026 George W Walford; the Python port, security hardening, and related docs) are licensed under the **GNU General Public License, version 2 only** (`GPL-2.0-only`). See [`COPYING`](COPYING). Not "or later".
 
 MIT is GPL-compatible, so the combined work can be distributed under GPL v2 provided the MIT notice is retained. The original, unmodified upstream remains available under MIT from its own repository.

@@ -7,6 +7,8 @@ Supports session continuity for multi-turn conversations.
 
 Python port of dm-claude.ts. Standard library only (Python 3.8+), no Bun.
 
+Copyright (c) 2026 George W Walford (modifications and new code)
+
 Derived from dm-claude.ts in https://github.com/jthack/dm-other-claudes, which is
 MIT licensed (see LICENSE-MIT; that notice is retained for the upstream-derived
 portions). Modifications and new code in this file are licensed under the GNU
