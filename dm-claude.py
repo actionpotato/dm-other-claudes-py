@@ -7,6 +7,13 @@ Supports session continuity for multi-turn conversations.
 
 Python port of dm-claude.ts. Standard library only (Python 3.8+), no Bun.
 
+Derived from dm-claude.ts in https://github.com/jthack/dm-other-claudes, which is
+MIT licensed (see LICENSE-MIT; that notice is retained for the upstream-derived
+portions). Modifications and new code in this file are licensed under the GNU
+General Public License, version 2 only (see COPYING).
+
+SPDX-License-Identifier: GPL-2.0-only AND MIT
+
 Usage:
   dm-claude.py <user@host> "prompt"
   dm-claude.py -s <session-id> <user@host> "follow-up"
