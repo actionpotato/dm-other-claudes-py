@@ -305,14 +305,26 @@ def _raise_interrupted(signum, _frame):
     raise Interrupted(signum)
 
 
+def _set_unless_ignored(names, handler):
+    for name in names:
+        sig = getattr(signal, name, None)
+        # A signal that was ignored when we started (nohup, `trap '' HUP`, a supervisor)
+        # stays ignored: whoever set that wants this run to survive it.
+        if sig is not None and signal.getsignal(sig) != signal.SIG_IGN:
+            signal.signal(sig, handler)
+
+
 def set_signal_handlers(handler):
     # SIGINT already raises KeyboardInterrupt. SIGTERM (kill, a caller's tool timeout) and
     # SIGHUP (closed terminal) would otherwise end us at once and leave the remote claude
     # running with nobody to read its answer. SIGHUP does not exist on Windows.
-    for name in ("SIGTERM", "SIGHUP"):
-        sig = getattr(signal, name, None)
-        if sig is not None:
-            signal.signal(sig, handler)
+    _set_unless_ignored(("SIGTERM", "SIGHUP"), handler)
+
+
+def end_at_next_signal():
+    """Called once the first interrupt is being handled: a second signal (an impatient
+    Ctrl-C) must end us at once instead of interrupting the cleanup half way."""
+    _set_unless_ignored(("SIGTERM", "SIGHUP", "SIGINT"), signal.SIG_DFL)
 
 
 def interrupt_exit_code(exc):
@@ -391,7 +403,7 @@ def main():
         remote_cleanup(target, run_dir, kill=False)     # part of the prompt may be there
         sys.exit(1)
     except (KeyboardInterrupt, Interrupted) as e:
-        set_signal_handlers(signal.SIG_DFL)
+        end_at_next_signal()
         log("interrupted during upload, removing the prompt from the remote...")
         remote_cleanup(target, run_dir, kill=False)
         sys.exit(interrupt_exit_code(e))
@@ -425,7 +437,7 @@ def main():
         run = subprocess.run(run_cmd, stdin=subprocess.DEVNULL,
                              capture_output=True, timeout=args.timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt, Interrupted) as e:
-        set_signal_handlers(signal.SIG_DFL)  # a second signal ends us at once
+        end_at_next_signal()
         if isinstance(e, subprocess.TimeoutExpired):
             log(f"TIMEOUT after {args.timeout}s, terminating remote...")
         else:

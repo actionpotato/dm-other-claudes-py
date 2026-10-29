@@ -574,6 +574,24 @@ esac
         self.assertIn("upload timed out", err)
         self.assertFalse(os.path.lexists(f"/tmp/dm-claude-{run_id}"), "prompt left on the remote")
 
+    def test_an_ignored_hangup_stays_ignored(self):
+        # nohup, `trap '' HUP`, a supervisor: the caller wants this run to outlive its terminal
+        p = self.start_slow_run(mode="slowok", prefix=("/bin/sh", "-c", 'trap "" HUP; exec "$@"', "sh"),
+                                args=("me@host", "x"), marker="claude.pid")
+        p.send_signal(signal.SIGHUP)
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertIn("survived", out)
+
+    def test_a_second_ctrl_c_ends_the_cleanup_at_once(self):
+        p = self.start_slow_run(FAKE_SSH_SLOW_CLEANUP="8")
+        p.send_signal(signal.SIGINT)
+        time.sleep(1.5)                         # now inside the (slow) remote cleanup
+        p.send_signal(signal.SIGINT)
+        _, err = p.communicate(timeout=5)
+        self.assertEqual(p.returncode, -signal.SIGINT, err)
+        self.assertNotIn("Traceback", err)
+
     # -- in-process: pre-planted names, hostile pid-file contents ------------------------
 
     def _in_process_main(self, run_id, *argv):
