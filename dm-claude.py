@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -57,7 +58,28 @@ examples:
   dm-claude.py -t 1200 --skip-permissions user@myserver "run full analysis on target.com"
 """
 
-SSH_BASE = ["ssh", "-T", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+# accept-new trusts a host on first contact but refuses if its key later changes
+# (StrictHostKeyChecking=no would let a MITM silently read prompts and replies).
+SSH_BASE = [
+    "ssh", "-T",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "BatchMode=yes",
+    "-o", "ClearAllForwardings=yes",
+    "-o", "ForwardAgent=no",
+    "-o", "ConnectTimeout=10",
+]
+
+# A target starting with "-" would be parsed by ssh as an option
+# (e.g. -oProxyCommand=...), which is local command execution.
+TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:%\[\]-]*$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Remote output is untrusted: drop ANSI escapes and control characters
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
+CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize(text):
+    return CTRL_RE.sub("", ANSI_RE.sub("", text))
 
 
 def log(msg):
@@ -87,6 +109,12 @@ def parse_args():
     if not args.target or (not args.prompt and not args.prompt_file):
         log("Error: need <user@host> and a prompt (or -f <file>)")
         log("Run with -h for help")
+        sys.exit(1)
+    if not TARGET_RE.match(args.target):
+        log(f"Error: invalid target {args.target!r} (expected user@host)")
+        sys.exit(1)
+    if args.session and not SESSION_RE.match(args.session):
+        log("Error: invalid session id")
         sys.exit(1)
     return args
 
@@ -144,7 +172,9 @@ def main():
 
     # Two-phase: upload prompt over stdin to a remote temp file, then run
     # claude reading from it. Avoids all shell escaping issues.
-    tmp_file = f"/tmp/dm-claude-{uuid.uuid4().hex[:8]}.txt"
+    # Full 128-bit name; the remote writes it with umask 077 and noclobber
+    # (O_EXCL) so a pre-planted file or symlink can't be followed or read.
+    tmp_file = f"/tmp/dm-claude-{uuid.uuid4().hex}.txt"
 
     sid_note = f" (session {args.session[:12]}...)" if args.session else ""
     log(f"-> {target}{sid_note}")
@@ -156,7 +186,7 @@ def main():
     # Phase 1: upload prompt
     try:
         up = subprocess.run(
-            SSH_BASE + [target, f"cat > {tmp_file}"],
+            SSH_BASE + ["--", target, f"umask 077; set -C; cat > {tmp_file}"],
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=60,
@@ -174,7 +204,7 @@ def main():
     run_cmd = SSH_BASE + [
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=20",
-        target,
+        "--", target,
         f"{remote_cmd} < {tmp_file}; EXIT=$?; rm -f {tmp_file}; exit $EXIT",
     ]
     try:
@@ -183,14 +213,13 @@ def main():
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT after {args.timeout}s, killing...")
         subprocess.run(
-            ["ssh", "-T", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
-             target, f"rm -f {tmp_file}"],
+            SSH_BASE + ["-o", "ConnectTimeout=5", "--", target, f"rm -f {tmp_file}"],
             stdin=subprocess.DEVNULL, capture_output=True,
         )
         sys.exit(124)
 
     stdout = run.stdout.decode("utf-8", errors="replace")
-    stderr = run.stderr.decode("utf-8", errors="replace")
+    stderr = sanitize(run.stderr.decode("utf-8", errors="replace"))
 
     if args.verbose and stderr:
         log(f"stderr:\n{stderr}")
@@ -202,10 +231,12 @@ def main():
     parsed = try_parse_result(stdout)
     if not parsed:
         log("warning: could not parse JSON, raw output follows")
-        print(stdout)
+        print(sanitize(stdout))
         return
 
     sid = parsed.get("session_id")
+    if not isinstance(sid, str) or not SESSION_RE.match(sid):
+        sid = None
     result = parsed.get("result", parsed.get("text", ""))
     cost = parsed.get("cost_usd", parsed.get("total_cost_usd"))
     turns = parsed.get("num_turns")
@@ -215,12 +246,12 @@ def main():
     if sid:
         log(f"session_id: {sid}")
         log(f'continue: python3 dm-claude.py -s {sid} {target} "follow-up"')
-    if cost is not None:
-        d = f"{duration / 1000:.1f}s" if duration else "?"
+    if isinstance(cost, (int, float)):
+        d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
         err = " ERROR" if parsed.get("is_error") else ""
-        log(f"cost=${cost:.4f} turns={turns if turns is not None else '?'} time={d}{err}")
+        log(f"cost=${cost:.4f} turns={turns if isinstance(turns, int) else '?'} time={d}{err}")
 
-    print(result)
+    print(sanitize(str(result)))
 
 
 if __name__ == "__main__":

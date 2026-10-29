@@ -115,6 +115,14 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 
 For new conversations, a preamble is prepended explaining to the remote Claude that it's receiving a cross-Claude task. On follow-ups (`--session`), the preamble is skipped since the remote already has context.
 
+## Security notes
+
+- **Host keys:** SSH uses `StrictHostKeyChecking=accept-new` (trust on first use, refuse if the key later changes), `BatchMode=yes`, and no agent/port forwarding. The original used `StrictHostKeyChecking=no`, which allows silent MITM.
+- **Input validation:** `<user@host>` must not start with `-` (ssh would treat it as an option such as `-oProxyCommand=...`); `--` precedes the target; session IDs are restricted to `[A-Za-z0-9_-]`; all remote command parts are shell-quoted.
+- **Temp file:** the prompt is written on the remote with a 128-bit random name, `umask 077` and noclobber, so it is private and can't be pre-planted or symlink-redirected; it is deleted after the run.
+- **Output:** remote replies and stderr are stripped of ANSI/control characters before display.
+- **`--skip-permissions`** is full shell access as the remote user. Use it only on hosts and tasks you trust, and don't pass untrusted content into such prompts. Remote replies are untrusted data.
+
 ## Tips
 
 - **Use IP addresses** if hostname resolution is flaky on your network
