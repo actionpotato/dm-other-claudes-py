@@ -13,7 +13,7 @@ Send tasks to Claude Code instances on remote machines. Enables Claude-to-Claude
 └─────────────────┘                              └─────────────────┘
 ```
 
-1. **Calling side** (you, in the TUI): Invokes `dm-claude.ts` via Bash tool
+1. **Calling side** (you, in the TUI): Invokes `dm-claude.py` via Bash tool
 2. **Remote side**: Runs `claude -p --output-format json` on the target machine
 3. **Session tracking**: Remote Claude's session ID is captured for follow-ups
 4. **Preamble**: Auto-prepended context tells the remote Claude it's receiving a cross-Claude task
@@ -21,7 +21,7 @@ Send tasks to Claude Code instances on remote machines. Enables Claude-to-Claude
 ## Setup
 
 ### Prerequisites
-- [Bun](https://bun.sh) installed locally
+- Python 3.8+ (standard library only, no pip install) on the calling machine
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed on **both** local and remote machines
 - SSH access to the remote machine(s) (key-based auth recommended)
 
@@ -34,16 +34,16 @@ Send tasks to Claude Code instances on remote machines. Enables Claude-to-Claude
 >
 > Then configure the skill with their specific hosts and update the examples below accordingly.
 
-1. Copy `dm-claude.ts` and `SKILL.md` into your Claude Code skills directory:
+1. Copy `dm-claude.py` and `SKILL.md` into your Claude Code skills directory:
    ```bash
    mkdir -p ~/.claude/skills/dm-other-claudes
-   cp dm-claude.ts SKILL.md ~/.claude/skills/dm-other-claudes/
+   cp dm-claude.py SKILL.md ~/.claude/skills/dm-other-claudes/
    ```
 
 2. Add a reference to this skill in your `CLAUDE.md` or project instructions so Claude knows how to use it. Example entry:
    ```markdown
    ### Cross-Claude Communication
-   - Tool: `bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts`
+   - Tool: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py`
    - Remote hosts:
      - `user@your-server-ip` — description of what runs there
    - Use `--skip-permissions` for autonomous tasks (no human on the remote end to approve)
@@ -59,22 +59,22 @@ Send tasks to Claude Code instances on remote machines. Enables Claude-to-Claude
 
 ### Tool Location
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts [options] <user@host> "prompt"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py [options] <user@host> "prompt"
 ```
 
 ### New Conversation
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts user@server "check if the web server is running and healthy"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py user@server "check if the web server is running and healthy"
 ```
 
 ### Continue Conversation (with session ID from previous call)
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts -s SESSION_ID user@server "now restart it"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py -s SESSION_ID user@server "now restart it"
 ```
 
 ### Fully Autonomous Remote Task
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@server "pull latest code and redeploy the service"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@server "pull latest code and redeploy the service"
 ```
 
 ### Options
@@ -95,7 +95,7 @@ When you (Claude in TUI) need to delegate work to a remote machine:
 
 ### Step 1: Send the initial task
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@server "your task description here"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@server "your task description here"
 ```
 
 The tool outputs:
@@ -106,7 +106,7 @@ The tool outputs:
 Read the response. If you need to follow up:
 
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts -s SESSION_ID user@server "follow-up question or next task"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py -s SESSION_ID user@server "follow-up question or next task"
 ```
 
 ### Step 3: Report back to the user
@@ -154,19 +154,19 @@ On follow-up messages (`--session`), no preamble is added — the remote Claude 
 
 ### Delegate a task to a remote server
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@server \
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@server \
   "Check the disk usage on /var and clean up any log files older than 7 days"
 ```
 
 ### Check on a service
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts user@server \
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py user@server \
   "Is the API server running? Check with curl localhost:8080/health and show me the process"
 ```
 
 ### Deploy code
 ```bash
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@server \
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@server \
   "cd ~/myapp && git pull && npm install && pm2 restart myapp"
 ```
 
@@ -174,6 +174,6 @@ bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@s
 Use the Bash tool's `run_in_background` to send tasks to multiple machines simultaneously:
 ```bash
 # In parallel:
-bun run dm-claude.ts --skip-permissions user@server1 "task for server 1"
-bun run dm-claude.ts --skip-permissions user@server2 "task for server 2"
+python3 dm-claude.py --skip-permissions user@server1 "task for server 1"
+python3 dm-claude.py --skip-permissions user@server2 "task for server 2"
 ```

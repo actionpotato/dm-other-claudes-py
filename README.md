@@ -17,9 +17,15 @@ Born from the annoyance of manually relaying messages between Claude Code sessio
 
 Your local Claude sends a prompt to a remote machine via SSH, where another Claude Code instance runs it headlessly (`claude -p`), and the response comes back. Sessions are tracked so you can have multi-turn conversations across machines.
 
+## Python port / Home Assistant
+
+This fork replaces the Bun/TypeScript script with `dm-claude.py`: standard library only, Python 3.8+, plus the `ssh` client. Nothing to `pip install`, so it runs on Linux boxes, Raspberry Pis and Home Assistant (e.g. the Advanced SSH & Terminal add-on, or a `shell_command` / container with `openssh-client`). Flags and output are identical to the original. Fork of [jthack/dm-other-claudes](https://github.com/jthack/dm-other-claudes).
+
+Only the *calling* side needs Python; the remote side still needs the Claude Code CLI.
+
 ## Prerequisites
 
-- [Bun](https://bun.sh) installed on your local machine
+- Python 3.8+ (standard library only, no pip install) on the calling machine
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated on **both** local and remote machines
 - SSH key-based auth to the remote machine(s)
 
@@ -29,7 +35,7 @@ Your local Claude sends a prompt to a remote machine via SSH, where another Clau
 
 ```bash
 mkdir -p ~/.claude/skills/dm-other-claudes
-cp dm-claude.ts SKILL.md ~/.claude/skills/dm-other-claudes/
+cp dm-claude.py SKILL.md ~/.claude/skills/dm-other-claudes/
 ```
 
 ### 2. Tell Claude how to use it
@@ -41,15 +47,15 @@ Add something like this to your `CLAUDE.md` (either `~/.claude/CLAUDE.md` for gl
 
 I can send tasks to Claude Code instances on remote machines using the dm-claude tool.
 
-**Tool location**: `bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts`
+**Tool location**: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py`
 
 **My remote agents**:
 - `alice@10.0.1.50` — build server (has access to CI/CD, Docker, test suites)
 - `bob@devbox.example.com` — dev environment (has the full monorepo checked out)
 
 **Usage**:
-- New task: `bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts --skip-permissions user@host "task"`
-- Follow-up: `bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts -s SESSION_ID user@host "follow-up"`
+- New task: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@host "task"`
+- Follow-up: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py -s SESSION_ID user@host "follow-up"`
 - Use `--skip-permissions` for autonomous tasks (no human on remote to approve prompts)
 - Use `-t 1200` for long-running tasks (default timeout is 600s)
 
@@ -66,26 +72,26 @@ service health checks, builds, or any work that requires access to that machine'
 ssh user@your-server "claude --version"
 
 # Test the full round-trip
-bun run ~/.claude/skills/dm-other-claudes/dm-claude.ts user@your-server "echo hello from the remote side"
+python3 ~/.claude/skills/dm-other-claudes/dm-claude.py user@your-server "echo hello from the remote side"
 ```
 
 ## Usage
 
 ```bash
 # New conversation
-bun run dm-claude.ts user@server "check disk usage and report back"
+python3 dm-claude.py user@server "check disk usage and report back"
 
 # Continue a conversation (session ID is printed after each call)
-bun run dm-claude.ts -s SESSION_ID user@server "now clean up the /tmp directory"
+python3 dm-claude.py -s SESSION_ID user@server "now clean up the /tmp directory"
 
 # Autonomous mode (remote Claude can use tools without asking)
-bun run dm-claude.ts --skip-permissions user@server "deploy the latest main branch"
+python3 dm-claude.py --skip-permissions user@server "deploy the latest main branch"
 
 # Read prompt from a file
-bun run dm-claude.ts -f task.md user@server
+python3 dm-claude.py -f task.md user@server
 
 # Override model, increase timeout
-bun run dm-claude.ts --model claude-sonnet-4-6 -t 1200 user@server "long analysis task"
+python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysis task"
 ```
 
 ### Options
