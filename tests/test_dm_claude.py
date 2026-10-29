@@ -245,6 +245,8 @@ class LogTests(unittest.TestCase):
                     dmc.log("one\ntwo")
                     dmc.log("three")
                 self.assertEqual(out.getvalue(), "", "log lines must never end up on stdout")
+                if sys.stderr is not dead:      # the /dev/null sink log() swapped in
+                    sys.stderr.close()
 
 
 class ReplyTextTests(unittest.TestCase):
@@ -321,6 +323,15 @@ fi
 # FAKE_SSH_SLOW_CLEANUP: the kill/cleanup connection takes a while (window for a second signal)
 if [ -n "$FAKE_SSH_SLOW_CLEANUP" ]; then
   case "$cmd" in *"kt()"*) sleep "$FAKE_SSH_SLOW_CLEANUP";; esac
+fi
+# FAKE_SSH_SLOW_UPLOAD: the upload has finished on the remote (prompt in place) but the
+# connection then hangs, for this many seconds
+if [ -n "$FAKE_SSH_SLOW_UPLOAD" ]; then
+  case "$cmd" in *"mkdir "*)
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$cmd" <&0
+    : > "$FAKE_STATE/upload.done"
+    exec sleep "$FAKE_SSH_SLOW_UPLOAD";;
+  esac
 fi
 # FAKE_SSH_DROP=run: the link dies after claude started; the remote keeps running (as with
 # a real dropped connection) and ssh itself exits 255. FAKE_SSH_DROP=upload: the same right
@@ -508,6 +519,20 @@ esac
                 self.assertEqual(code, expect, err)
                 self.assertIn("remote process tree signalled", err)
                 self.assertGone(self.grandchild_pid(), "grandchild")
+                self.assertNoRemoteFiles(err)
+
+    def test_signals_during_the_upload_remove_the_prompt(self):
+        # The prompt is already on the remote when the connection hangs; an interrupt at that
+        # point must take it (and the run directory) away again.
+        for signum, expect in ((signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGINT, 130)):
+            with self.subTest(signal=signum.name):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(self.tmp, "upload.done"))
+                p = self.start_slow_run(marker="upload.done", FAKE_SSH_SLOW_UPLOAD="60")
+                p.send_signal(signum)
+                _, err = p.communicate(timeout=30)
+                self.assertEqual(p.returncode, expect, err)
+                self.assertIn("interrupted during upload", err)
                 self.assertNoRemoteFiles(err)
 
     def test_prompt_from_standard_input(self):
@@ -746,7 +771,7 @@ esac
         A broken pid guard can end up signalling a whole process group, and that must not be ours."""
         r = subprocess.run([sys.executable, "-I", "-B", "-c", self.CLEANUP_CHILD, SCRIPT, *run_dirs],
                            env=dict(self.env, **{k: v for k, v in (("FAKE_BIN_SH", sh), ("FAKE_REMOTE_SH", login)) if v}),
-                           capture_output=True, text=True,
+                           capture_output=True, text=True, cwd=self.tmp,
                            timeout=60, start_new_session=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
@@ -763,11 +788,15 @@ esac
         canary = subprocess.Popen(["sleep", "60"])
         self.addCleanup(canary.kill)
         marker = os.path.join(self.tmp, "pwned")
+        short_marker = os.path.join(self.tmp, "x")      # the cleanup shell runs in self.tmp
         hostile = ["-1", "12 34", "1", "0", "", "abc", "00012", f"0{canary.pid}",
                    "123456789",                     # 9 digits
                    "12\n34", "12\r",               # a newline hides inside `$(...)` and test(1)
                    "4294967296", "4294967297",      # 2**32 and 2**32+1: zsh/ksh read them as 0 and 1
-                   f"{canary.pid}; touch {marker}", f"$(touch {marker})", f"{canary.pid} {canary.pid}"]
+                   f"{canary.pid}; touch {marker}", f"$(touch {marker})", f"{canary.pid} {canary.pid}",
+                   # Short enough (8 characters or fewer) to pass the length cap: only the
+                   # digits-only test keeps these out of `[ -gt ]`, which ksh evaluates as arithmetic
+                   "$(>x)", "a[$(>x)]", "`>x`"]
         for sh in remote_shells():
             with self.subTest(sh=sh):
                 run_dirs = [self.new_run_dir(content) for content in hostile]
@@ -775,6 +804,7 @@ esac
                 self.assertEqual(dict(zip(hostile, statuses)), {c: ["no-pid"] for c in hostile})
                 self.assertIsNone(canary.poll(), "canary was signalled")
                 self.assertFalse(os.path.exists(marker), "injected command ran")
+                self.assertFalse(os.path.exists(short_marker), "injected command ran (short payload)")
                 self.assertEqual([d for d in run_dirs if os.path.lexists(d)], [], "run directory not removed")
         gone = subprocess.Popen(["true"])
         gone.wait()                 # a plain number, but nothing runs under it any more
