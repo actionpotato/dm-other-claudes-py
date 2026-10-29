@@ -75,6 +75,15 @@ examples:
 
   # Long-running task with generous timeout
   dm-claude.py -t 1200 user@myserver "run the full test suite and summarise failures"
+
+exit status:
+  0      the remote claude answered
+  1      bad arguments, the upload failed, or the remote claude reported an error
+  124    timed out (-t); the remote claude was stopped
+  130    interrupted with Ctrl-C; the remote claude was stopped
+  129, 143   killed by SIGHUP / SIGTERM (128 + signal); the remote claude was stopped
+  255    ssh itself failed (connection lost, host key changed, ...)
+  other  the remote command's own status (127: claude not found on the remote's PATH)
 """
 
 # accept-new trusts a host on first contact but refuses if its key later changes

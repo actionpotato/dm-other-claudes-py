@@ -113,6 +113,18 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 | `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable); only allow-listed names are accepted, currently `CLAUDE_CONFIG_DIR` (e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`); anything else (`PATH`, `NODE_OPTIONS`, `ANTHROPIC_BASE_URL`, `LD_PRELOAD`, ...) is refused. Extend `REMOTE_ENV_ALLOW` in the script if you need more |
 | `-v, --verbose` | Debug output |
 
+### Exit status
+
+| Code | Meaning |
+|------|---------|
+| 0 | the remote claude answered |
+| 1 | bad arguments, the upload failed, or the remote claude reported an error (including a result whose `subtype` starts with `error`, such as `error_max_turns`) |
+| 124 | timed out (`-t`); the remote claude was stopped |
+| 130 | interrupted with Ctrl-C; the remote claude was stopped |
+| 129, 143 | killed by `SIGHUP` / `SIGTERM` (128 + signal); the remote claude was stopped |
+| 255 | ssh itself failed (connection lost, host key changed, ...) |
+| other | the remote command's own status, also when it printed non-JSON or a valid result and then failed (127: `claude` not found on the remote's `PATH`) |
+
 ## How It Works
 
 1. **Phase 1 — Upload**: A private directory `/tmp/dm-claude-<random>/` is created on the remote and the prompt is uploaded into it via `ssh ... cat > /tmp/dm-claude-<random>/prompt`. This avoids all shell escaping issues.

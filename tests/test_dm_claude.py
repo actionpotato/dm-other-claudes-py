@@ -80,6 +80,14 @@ def login_shells():
     return found
 
 
+class HelpTests(unittest.TestCase):
+    def test_every_exit_status_the_script_can_produce_is_documented(self):
+        section = dmc.EPILOG.split("exit status:")[1]
+        for code in (0, 1, 124, 130, 128 + signal.SIGHUP, 128 + signal.SIGTERM, 255, 127):
+            with self.subTest(code=code):
+                self.assertRegex(section, rf"\b{code}\b")
+
+
 class ValidatorTests(unittest.TestCase):
     def assertRefused(self, *argv):
         result, _ = parse(*argv)
