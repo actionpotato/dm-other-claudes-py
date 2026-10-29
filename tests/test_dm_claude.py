@@ -359,6 +359,14 @@ fi
 if [ -n "$FAKE_SSH_SLOW_CLEANUP" ]; then
   case "$cmd" in *"kt()"*|"/bin/sh -c 'rm -f "*) sleep "$FAKE_SSH_SLOW_CLEANUP";; esac
 fi
+# FAKE_SSH_NO_CLEANUP: the cleanup connection cannot be made (the link is still down), so
+# only what the remote script does by itself can clean up
+if [ -n "$FAKE_SSH_NO_CLEANUP" ]; then
+  case "$cmd" in *"kt()"*|*"-c 'rm -f "*)
+    echo "ssh: connect to host: Connection refused" >&2
+    exit 255;;
+  esac
+fi
 # FAKE_SSH_SLOW_UPLOAD: the upload has finished on the remote (prompt in place) but the
 # connection then hangs, for this many seconds
 if [ -n "$FAKE_SSH_SLOW_UPLOAD" ]; then
@@ -492,9 +500,12 @@ esac
     def start_slow_run(self, mode="sleep", prefix=(), args=("-v", "-t", "120", "me@host", "slow"),
                        marker="child.pid", stderr=subprocess.PIPE, **extra_env):
         """Start a slow run and wait until the fake claude is up. SIGINT may be inherited as
-        "ignored"; the wrapper makes sure Python turns it into KeyboardInterrupt."""
+        "ignored" (a backgrounded shell job), SIGHUP too (nohup): the wrapper makes sure Python
+        turns SIGINT into KeyboardInterrupt and that SIGHUP/SIGTERM are the defaults, unless the
+        caller passes a `prefix` that sets up its own disposition on purpose."""
+        reset = "" if prefix else "signal.signal(signal.SIGHUP, signal.SIG_DFL); signal.signal(signal.SIGTERM, signal.SIG_DFL); "
         wrapper = ("import runpy, signal, sys; "
-                   "signal.signal(signal.SIGINT, signal.default_int_handler); "
+                   "signal.signal(signal.SIGINT, signal.default_int_handler); " + reset +
                    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
         p = subprocess.Popen(
             [*prefix, sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, *args],
@@ -621,6 +632,16 @@ esac
                 self.assertNotEqual(r.returncode, 0, r.stderr)
                 self.assertNoRemoteFiles(r.stderr)
 
+    def test_the_remote_removes_its_own_files_when_the_cleanup_connection_fails(self):
+        # The local fallback cleanup (after a failed run) can fail as well: the remote
+        # script's own EXIT trap, armed before it opens the prompt, must stand alone.
+        for sh in remote_shells():
+            with self.subTest(sh=sh):
+                r = self.run_script("-v", "me@host", "x", FAKE_VANISH_PROMPT="1", FAKE_BIN_SH=sh,
+                                    FAKE_SSH_NO_CLEANUP="1")
+                self.assertNotEqual(r.returncode, 0, r.stderr)
+                self.assertNoRemoteFiles(r.stderr)
+
     def test_error_subtype_is_sanitized_and_cannot_forge_status_lines(self):
         r = self.run_script("me@host", "x", mode="err")
         self.assertEqual(r.returncode, 1, r.stderr)        # also: a lone surrogate must not crash print()
@@ -716,6 +737,30 @@ esac
         self.assertIn("upload timed out", err)
         self.assertFalse(os.path.lexists(f"/tmp/dm-claude-{run_id}"), "prompt left on the remote")
 
+    def test_a_second_signal_ends_us_during_the_cleanup_after_an_upload_timeout(self):
+        # The 60 s upload limit cannot be waited for, so look at the signal dispositions the
+        # cleanup runs under: ours (which raise Interrupted half way) must be gone.
+        run_id = uuid.uuid4().hex
+        real_run, seen = subprocess.run, {}
+
+        def spy(cmd, *a, **kw):
+            if not seen.get("raised"):
+                seen["raised"] = True
+                real_run(cmd, *a, **kw)
+                raise subprocess.TimeoutExpired(cmd, 60)
+            return real_run(cmd, *a, **kw)
+
+        def cleanup_spy(target, run_dir, kill):
+            seen["handlers"] = {s.name: signal.getsignal(s)
+                                for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+            return set()
+
+        with mock.patch.object(dmc.subprocess, "run", spy), mock.patch.object(dmc, "remote_cleanup", cleanup_spy):
+            self._in_process_main(run_id, "me@host", "hi")
+        self.assertIn("handlers", seen, "no cleanup was attempted")
+        for name, handler in seen["handlers"].items():
+            self.assertIn(handler, (signal.SIG_DFL, signal.SIG_IGN), f"{name} still handled during the cleanup")
+
     def test_an_ignored_hangup_stays_ignored(self):
         # nohup, `trap '' HUP`, a supervisor: the caller wants this run to outlive its terminal
         p = self.start_slow_run(mode="slowok", prefix=("/bin/sh", "-c", 'trap "" HUP; exec "$@"', "sh"),
@@ -734,6 +779,7 @@ esac
         self.logged_run_dirs()                  # abandoned on purpose: make sure it is removed
         self.assertEqual(p.returncode, -signal.SIGINT, err)
         self.assertNotIn("Traceback", err)
+        self.assertIn("a second Ctrl-C abandons the cleanup", err)
 
     def test_a_second_signal_during_a_failure_cleanup_ends_us_quietly(self):
         # The connection died (during the upload, or while claude ran) and the cleanup that
