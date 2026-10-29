@@ -1,5 +1,7 @@
 # dm-other-claudes-py
 
+> **This is a fork of [jthack/dm-other-claudes](https://github.com/jthack/dm-other-claudes) that uses Python instead of Bun.** The original `dm-claude.ts` script is replaced by `dm-claude.py`, which needs only Python 3.8+ (standard library) and the `ssh` client, so it runs on Home Assistant and any Linux machine without installing Bun. Behaviour and flags are otherwise the same, plus some security hardening (see [Security notes](#security-notes)). Credit for the original idea and design goes to the upstream author.
+
 Let your main Claude Code instance communicate with remote Claude Code instances over SSH. Instead of copying messages back and forth between terminal windows, your Claudes can just talk to each other directly.
 
 Born from the annoyance of manually relaying messages between Claude Code sessions on different servers. Each Claude knows its own machine best — now they can collaborate without you playing telephone.
