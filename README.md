@@ -42,7 +42,7 @@ cp dm-claude.py SKILL.md ~/.claude/skills/dm-other-claudes/
 
 ### 2. Tell Claude how to use it
 
-Add something like this to your `CLAUDE.md` (either `~/.claude/CLAUDE.md` for global, or a project-level one):
+Add something like this to a project-level `CLAUDE.md`. Keep it per project rather than global, so the hosts a session may reach are listed where the work is and every call stays visible to you:
 
 ```markdown
 ### Cross-Claude Communication (dm-claude)
@@ -56,9 +56,9 @@ I can send tasks to Claude Code instances on remote machines using the dm-claude
 - `bob@devbox.example.com` — dev environment (has the full monorepo checked out)
 
 **Usage**:
-- New task: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@host "task"`
+- New task: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py user@host "task"`
 - Follow-up: `python3 ~/.claude/skills/dm-other-claudes/dm-claude.py -s SESSION_ID user@host "follow-up"`
-- Use `--skip-permissions` for autonomous tasks (no human on remote to approve prompts)
+- Add `--skip-permissions` only when I have approved that specific task on that host (it gives the remote Claude unrestricted shell access)
 - Use `-t 1200` for long-running tasks (default timeout is 600s)
 
 **When to use**: Delegate tasks that need to run on specific machines — deployments, log analysis,
@@ -103,7 +103,7 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 | `-s, --session <id>` | Resume a previous session |
 | `-t, --timeout <sec>` | Timeout in seconds (default: 600) |
 | `-f, --file <path>` | Read prompt from file |
-| `--skip-permissions` | Autonomous mode on remote |
+| `--skip-permissions` | Autonomous mode on remote (opt-in: unrestricted shell access as the remote user) |
 | `--max-turns <n>` | Limit tool-use turns |
 | `--model <model>` | Override remote model |
 | `--remote-claude <path>` | Absolute path to `claude` on the remote, for when it is not on a non-interactive SSH `PATH` (e.g. Home Assistant) |
@@ -112,19 +112,20 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 
 ## How It Works
 
-1. **Phase 1 — Upload**: The prompt is uploaded to a temp file on the remote via `ssh ... cat > /tmp/dm-claude-xxx.txt`. This avoids all shell escaping issues.
-2. **Phase 2 — Execute**: Claude runs headlessly reading from that temp file: `claude -p --output-format json < /tmp/dm-claude-xxx.txt`
+1. **Phase 1 — Upload**: A private directory `/tmp/dm-claude-<random>/` is created on the remote and the prompt is uploaded into it via `ssh ... cat > /tmp/dm-claude-<random>/prompt`. This avoids all shell escaping issues.
+2. **Phase 2 — Execute**: Claude runs headlessly reading from that file: `claude -p --output-format json < /tmp/dm-claude-<random>/prompt`
 3. **Parse**: The JSON response is parsed for the result text, session ID, cost, and duration.
-4. **Cleanup**: The temp file is deleted after execution.
+4. **Cleanup**: The prompt file is deleted as soon as claude has opened it, and the pid file and directory when the run ends. If the run times out, `dm-claude.py` also stops the remote claude and its child processes (exit code 124) instead of leaving it running unattended.
 
 For new conversations, a preamble is prepended explaining to the remote Claude that it's receiving a cross-Claude task. On follow-ups (`--session`), the preamble is skipped since the remote already has context.
 
 ## Security notes
 
 - **Host keys:** SSH uses `StrictHostKeyChecking=accept-new` (trust on first use, refuse if the key later changes), `BatchMode=yes`, and no agent/port forwarding. The original used `StrictHostKeyChecking=no`, which allows silent MITM.
-- **Input validation:** `<user@host>` must not start with `-` (ssh would treat it as an option such as `-oProxyCommand=...`); `--` precedes the target; session IDs are restricted to `[A-Za-z0-9_-]`; all remote command parts are shell-quoted.
-- **Temp file:** the prompt is written on the remote with a 128-bit random name, `umask 077` and noclobber, so it is private and can't be pre-planted or symlink-redirected; it is deleted after the run.
-- **Output:** remote replies and stderr are stripped of ANSI/control characters before display.
+- **Input validation:** `<user@host>` must not start with `-` (ssh would treat it as an option such as `-oProxyCommand=...`); `--` precedes the target; session IDs are restricted to `[A-Za-z0-9_-]`; all patterns are applied with `fullmatch` (a `$` anchor alone also accepts a trailing newline); all remote command parts are shell-quoted. `--remote-env` is an allow-list (currently `CLAUDE_CONFIG_DIR`), because variables such as `NODE_OPTIONS`, `ANTHROPIC_BASE_URL` or `PATH` can load code or redirect credentials.
+- **Remote files:** each run gets its own directory, `/tmp/dm-claude-<128-bit random>/`, created with `umask 077; mkdir`. `mkdir` is atomic and fails if the name already exists as anything (a file, FIFO, symlink or directory), so a local user on the remote cannot pre-plant the name or redirect the write; the directory is mode 700, so nothing in it can be created, replaced or read by anyone else. (Noclobber, `set -C`, would not do: it only protects regular files and writes through a FIFO or a symlink to a device.) This relies on `/tmp` having the sticky bit, as it does by default. The prompt is deleted as soon as it is opened.
+- **Timeout kill:** the remote pid is read back from the pid file, and only a plain decimal number of at most 8 digits without a leading zero, greater than 1 and naming a live process, is signalled. The length cap matters: zsh and ksh truncate `kill`'s argument to 32 bits, so `4294967296` would otherwise mean "our own process group". The log says what actually happened. Children that detach themselves (`nohup`, `setsid`) escape the process-tree walk.
+- **Output:** every remote-derived string (reply, stderr, error subtype) is stripped of ANSI escapes, C0/C1 control characters, lone surrogates, and characters a human cannot see but a model can read: soft hyphen, Arabic letter mark, zero-width space, line/paragraph separators, bidi embeddings, overrides and isolates, word joiner and invisible operators, BOM, interlinear annotation, and the Unicode tag block (the "ASCII smuggling" channel). Every logged line is prefixed with `[dm-claude]`, so multi-line remote text cannot forge a status line such as `session_id:`. **Not stripped, on purpose:** ZWNJ/ZWJ (Persian, Indic scripts, emoji sequences), LRM/RLM (mixed-direction text) and variation selectors (emoji presentation, CJK) are needed by legitimate text, so they remain a possible covert channel. Plain-text prompt injection cannot be filtered at all: treat replies as untrusted data.
 - **`--skip-permissions`** is full shell access as the remote user. Use it only on hosts and tasks you trust, and don't pass untrusted content into such prompts. Remote replies are untrusted data.
 
 ## Tips

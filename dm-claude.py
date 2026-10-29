@@ -61,11 +61,12 @@ examples:
   # Continue conversation
   dm-claude.py -s abc123 user@myserver "restart the one on port 8080"
 
-  # Fully autonomous remote task
+  # Autonomous remote task (opt-in: unrestricted shell on the remote, only for
+  # tasks you have approved on that host)
   dm-claude.py --skip-permissions user@myserver "pull latest code and redeploy"
 
   # Long-running task with generous timeout
-  dm-claude.py -t 1200 --skip-permissions user@myserver "run full analysis on target.com"
+  dm-claude.py -t 1200 user@myserver "run the full test suite and summarise failures"
 """
 
 # accept-new trusts a host on first contact but refuses if its key later changes
