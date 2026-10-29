@@ -84,6 +84,10 @@ SSH_BASE = [
 TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:%\[\]-]*$")
 # Must start alphanumeric so the value can never be parsed as a flag by remote claude
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+REMOTE_BIN_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Variables that change how the remote shell / loader behave: refuse to set them
+ENV_DENY_RE = re.compile(r"^(LD_.*|DYLD_.*|BASH_ENV|ENV|IFS|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND)$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
 # Remote output is untrusted: drop ANSI escapes and control characters
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
@@ -121,6 +125,12 @@ def parse_args():
                    help="Add --dangerously-skip-permissions on remote")
     p.add_argument("--max-turns", type=positive_int, help="Limit remote Claude's tool-use turns")
     p.add_argument("--model", help="Override remote Claude's model")
+    p.add_argument("--remote-claude", metavar="PATH",
+                   help="Absolute path to the claude binary on the remote "
+                        "(when it isn't on a non-interactive ssh PATH)")
+    p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VALUE",
+                   help="Set an environment variable for remote claude (repeatable), "
+                        "e.g. CLAUDE_CONFIG_DIR=/config/.claude-ssh")
     p.add_argument("-v", "--verbose", action="store_true", help="Show debug info")
     p.add_argument("target", nargs="?", help="user@host")
     p.add_argument("prompt", nargs="*", help="prompt text")
@@ -133,6 +143,14 @@ def parse_args():
     if not TARGET_RE.match(args.target):
         log(f"Error: invalid target {args.target!r} (expected user@host)")
         sys.exit(1)
+    if args.remote_claude and not REMOTE_BIN_RE.match(args.remote_claude):
+        log("Error: --remote-claude must be an absolute path (letters, digits, _ . / + -)")
+        sys.exit(1)
+    for kv in args.remote_env:
+        key, sep, _ = kv.partition("=")
+        if not sep or not ENV_KEY_RE.match(key) or ENV_DENY_RE.match(key):
+            log(f"Error: invalid or disallowed --remote-env {key!r}")
+            sys.exit(1)
     if args.model and not MODEL_RE.match(args.model):
         log("Error: invalid model name")
         sys.exit(1)
@@ -159,7 +177,7 @@ def build_prompt(args):
 
 
 def build_remote_cmd(args):
-    parts = ["claude"]
+    parts = [args.remote_claude or "claude"]
     if args.session:
         parts += ["--resume", args.session]
     parts += ["-p", "--output-format", "json"]
@@ -169,7 +187,8 @@ def build_remote_cmd(args):
         parts += ["--max-turns", str(args.max_turns)]
     if args.model:
         parts += ["--model", args.model]
-    return " ".join(shlex.quote(x) for x in parts)
+    env = [f"{k}={shlex.quote(v)}" for k, _, v in (kv.partition("=") for kv in args.remote_env)]
+    return " ".join(env + [shlex.quote(x) for x in parts])
 
 
 def try_parse_result(text):

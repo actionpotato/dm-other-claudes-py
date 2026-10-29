@@ -92,6 +92,8 @@ python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@s
 | `--skip-permissions` | Add `--dangerously-skip-permissions` on remote (needed for autonomous tool use) |
 | `--max-turns <n>` | Limit how many tool-use turns the remote Claude can take |
 | `--model <model>` | Override the remote Claude's model |
+| `--remote-claude <path>` | Absolute path to `claude` on the remote, for when it is not on a non-interactive SSH `PATH` (e.g. Home Assistant) |
+| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable), e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`. Loader/shell variables such as `LD_PRELOAD` are refused |
 | `-v, --verbose` | Debug output |
 
 ## How to Use From the TUI (Instructions for Claude)

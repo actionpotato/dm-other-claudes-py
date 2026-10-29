@@ -106,6 +106,8 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 | `--skip-permissions` | Autonomous mode on remote |
 | `--max-turns <n>` | Limit tool-use turns |
 | `--model <model>` | Override remote model |
+| `--remote-claude <path>` | Absolute path to `claude` on the remote, for when it is not on a non-interactive SSH `PATH` (e.g. Home Assistant) |
+| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable), e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`. Loader/shell variables such as `LD_PRELOAD` are refused |
 | `-v, --verbose` | Debug output |
 
 ## How It Works
