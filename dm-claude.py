@@ -78,12 +78,16 @@ examples:
 
 exit status:
   0      the remote claude answered
-  1      bad arguments, the upload failed, or the remote claude reported an error
-  124    timed out (-t); the remote claude was stopped
-  130    interrupted with Ctrl-C; the remote claude was stopped
-  129, 143   killed by SIGHUP / SIGTERM (128 + signal); the remote claude was stopped
-  255    ssh itself failed (connection lost, host key changed, ...)
-  other  the remote command's own status (127: claude not found on the remote's PATH)
+  1      an argument refused by our own checks, the upload failed, or the remote claude
+         reported an error or printed nothing
+  2      the command line was not understood (unknown flag, bad number)
+  124    timed out (-t); the remote claude was sent SIGTERM
+  130    interrupted with Ctrl-C; the remote claude was sent SIGTERM
+  129, 143   killed by SIGHUP / SIGTERM (128 + signal); the remote claude was sent SIGTERM
+  255    ssh itself failed (connection lost, host key changed, killed by a signal, ...);
+         the remote claude was sent SIGTERM
+  other  the remote command's own status (127: claude not found on the remote's PATH);
+         one that equals a code above cannot be told apart from it
 """
 
 # accept-new trusts a host on first contact but refuses if its key later changes
@@ -110,6 +114,11 @@ TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:%\[\]-]*$")
 # Must start alphanumeric so the value can never be parsed as a flag by remote claude
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 REMOTE_BIN_RE = re.compile(r"^/[A-Za-z0-9_./+-]+$")
+# A --remote-env value (a config directory) is a plain path. Quoting makes any value safe for
+# /bin/sh, but the remote *login* shell sees the command first: csh and tcsh expand `!` and
+# reject a newline even inside single quotes, fish reads a backslash, and a command they
+# reject never starts, so the cleanup trap never arms.
+REMOTE_ENV_VALUE_RE = re.compile(r"[A-Za-z0-9_./+@:%= -]+")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
 # Remote output is untrusted: drop ANSI escapes and control characters
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.")
@@ -136,8 +145,10 @@ def sanitize(text):
 
 # A reply line that starts with our log prefix could pose as one of our status lines
 # (session_id:, continue:) once stdout and stderr are shown interleaved, as the Bash tool
-# and `2>&1` do. Log lines are all prefixed, so only reply lines need this.
-REPLY_PREFIX_RE = re.compile(r"^([ \t]*)\[dm-claude\]", re.MULTILINE)
+# and `2>&1` do. Log lines are all prefixed, so only reply lines need this. Any whitespace may
+# precede the prefix (NBSP, em space, ideographic space ... : str.lstrip() removes them all);
+# after sanitize() the only line break left is "\n".
+REPLY_PREFIX_RE = re.compile(r"^([^\S\n]*)\[dm-claude\]", re.MULTILINE)
 
 
 def reply_text(text):
@@ -177,7 +188,8 @@ def parse_args():
     )
     p.add_argument("-s", "--session", help="Resume a previous session")
     p.add_argument("-t", "--timeout", type=positive_int, default=DEFAULT_TIMEOUT,
-                   help=f"SSH/command timeout in seconds (default: {DEFAULT_TIMEOUT})")
+                   help=f"Timeout for the remote run, in seconds (default: {DEFAULT_TIMEOUT}); "
+                        "the upload (60 s) and each cleanup (30 s) have fixed limits")
     p.add_argument("-f", "--file", dest="prompt_file", metavar="FILE",
                    help="Read prompt from file ('-' for standard input)")
     p.add_argument("--skip-permissions", action="store_true",
@@ -207,10 +219,14 @@ def parse_args():
         log("Error: --remote-claude must be an absolute path (letters, digits, _ . / + -)")
         sys.exit(1)
     for kv in args.remote_env:
-        key, sep, _ = kv.partition("=")
+        key, sep, value = kv.partition("=")
         if not sep or key not in REMOTE_ENV_ALLOW:
             log(f"Error: --remote-env {key!r} is not allowed "
                 f"(allowed: {', '.join(sorted(REMOTE_ENV_ALLOW))})")
+            sys.exit(1)
+        if not REMOTE_ENV_VALUE_RE.fullmatch(value):
+            log(f"Error: --remote-env {key} must be a plain path "
+                "(letters, digits, space and _ . / + @ : % = -)")
             sys.exit(1)
     if args.model and not MODEL_RE.fullmatch(args.model):
         log("Error: invalid model name")
@@ -287,7 +303,8 @@ def remote_sh(script):
 
 def remote_cleanup(target, run_dir, kill):
     """Best-effort remote cleanup over a fresh ssh; returns the set of status words
-    the remote script printed, or None if it could not be reached / timed out.
+    ("killed", "no-pid", "no-pgrep") the remote script printed, or None if it could not
+    be reached / timed out.
 
     With kill=True it first signals the process tree rooted at the recorded pid
     (children bottom-up, so tool subprocesses claude spawned die too). Only a
@@ -295,6 +312,9 @@ def remote_cleanup(target, run_dir, kill):
     whatever the pid file holds; "killed" is only reported in that case.
     """
     script = f"rm -f {run_dir}/prompt {run_dir}/pid; rmdir {run_dir} 2>/dev/null || :"
+    # Status words carry this run's name: the remote login shell may print anything first (an
+    # rc file's banner), and a banner saying "killed" must not be taken for our report.
+    tag = os.path.basename(run_dir)
     if kill:
         script = (
             'kt() { for c in $(pgrep -P "$1" 2>/dev/null); do kt "$c"; done; kill "$1" 2>/dev/null; }; '
@@ -307,8 +327,8 @@ def remote_cleanup(target, run_dir, kill):
             'case $p in ""|0*|?????????*) p=;; esac; '
             '[ "$(printf %s "$p" | LC_ALL=C tr -cd 0-9 2>/dev/null)" = "$p" ] || p=; '
             'if [ -n "$p" ] && [ "$p" -gt 1 ] && kill -0 "$p" 2>/dev/null; then '
-            'command -v pgrep >/dev/null 2>&1 || echo no-pgrep; kt "$p"; echo killed; '
-            'else echo no-pid; fi; ' + script
+            f'command -v pgrep >/dev/null 2>&1 || echo no-pgrep:{tag}; kt "$p"; echo killed:{tag}; '
+            f'else echo no-pid:{tag}; fi; ' + script
         )
     try:
         r = subprocess.run(
@@ -318,7 +338,10 @@ def remote_cleanup(target, run_dir, kill):
         )
     except subprocess.TimeoutExpired:
         return None
-    return set(r.stdout.decode("utf-8", errors="replace").split()) if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None
+    words = r.stdout.decode("utf-8", errors="replace").split()
+    return {w[:-len(tag) - 1] for w in words if w.endswith(":" + tag)}
 
 
 def kill_remote(target, run_dir):
@@ -442,6 +465,7 @@ def main():
         )
     except subprocess.TimeoutExpired:
         log("SSH connection failed: upload timed out")
+        end_at_next_signal()
         remote_cleanup(target, run_dir, kill=False)     # part of the prompt may be there
         sys.exit(1)
     except (KeyboardInterrupt, Interrupted) as e:
@@ -455,6 +479,7 @@ def main():
             # ssh itself failed, possibly after the remote `cat` finished: don't leave the
             # prompt behind. (Exit 1 is the remote script's own: it cleaned up, or mkdir
             # refused a name that is not ours to touch.)
+            end_at_next_signal()
             remote_cleanup(target, run_dir, kill=False)
         sys.exit(1)
     if args.verbose:
@@ -484,38 +509,57 @@ def main():
         if isinstance(e, subprocess.TimeoutExpired):
             log(f"TIMEOUT after {args.timeout}s, terminating remote...")
         else:
-            log("interrupted, terminating remote...")
+            log("interrupted, terminating remote (a second Ctrl-C abandons the cleanup)...")
         # Killing local ssh doesn't stop the remote process (no pty), so do it explicitly.
         kill_remote(target, run_dir)
         sys.exit(interrupt_exit_code(e))
-    set_signal_handlers(signal.SIG_DFL)
+    end_at_next_signal()        # the rest is failure cleanup and output: no half-done Interrupted
 
+    rc = run.returncode
+    if rc < 0:
+        # ssh itself was killed by a signal (OOM killer, pkill): sys.exit(-9) would say 247,
+        # and the remote claude is as stranded as after a dropped connection.
+        log(f"ssh was killed by signal {-rc}")
+        rc = 255
     stdout = run.stdout.decode("utf-8", errors="replace")
     stderr = sanitize(run.stderr.decode("utf-8", errors="replace"))
 
     if args.verbose and stderr:
         log(f"stderr:\n{stderr}")
 
-    if run.returncode != 0 and not stdout.strip():
-        log(f"FAILED (exit {run.returncode}): {stderr.strip()}")
-        explain_exit(run.returncode)
-        if run.returncode == 255:
+    if rc != 0 and not stdout.strip():
+        log(f"FAILED (exit {rc}): {stderr.strip()}")
+        explain_exit(rc)
+        if rc == 255:
             # ssh itself failed (e.g. the link dropped after the upload) and claude may well
             # still be running over there with nobody to read its answer: stop it, and
             # don't leave the prompt behind in the remote /tmp.
             kill_remote(target, run_dir)
-        sys.exit(run.returncode or 1)
+        else:
+            # The remote script's own EXIT trap cleans up when it ran at all. If the login
+            # shell rejected the command it never did, and the prompt is still over there.
+            remote_cleanup(target, run_dir, kill=False)
+        sys.exit(rc)
+    if rc == 255:
+        # Output arrived first (a login banner, part of a reply), but the connection still
+        # died: the same stranded remote claude.
+        kill_remote(target, run_dir)
+    if not stdout.strip():
+        # Only exit 0 gets here: the remote command succeeded and said nothing.
+        log("the remote command exited 0 but printed nothing"
+            + (f": {stderr.strip()}" if stderr.strip() else ""))
+        sys.exit(1)
 
     parsed = try_parse_result(stdout)
     if not parsed:
         log("warning: could not parse JSON, raw output follows")
         print(reply_text(stdout))
-        if run.returncode != 0:
-            log(f"remote command exited {run.returncode}")
+        if rc != 0:
+            log(f"remote command exited {rc}")
             if stderr.strip() and not args.verbose:  # -v already showed it
                 log(f"remote stderr:\n{stderr.strip()}")
-            explain_exit(run.returncode)
-            sys.exit(run.returncode)
+            explain_exit(rc)
+            sys.exit(rc)
         return
 
     sid = parsed.get("session_id")
@@ -549,11 +593,11 @@ def main():
     if is_error:
         log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
         sys.exit(1)
-    if run.returncode != 0:
+    if rc != 0:
         # A valid result line does not make a failed command a success (e.g. the remote
         # shell was killed after claude printed it).
-        log(f"remote command exited {run.returncode}")
-        sys.exit(run.returncode)
+        log(f"remote command exited {rc}")
+        sys.exit(rc)
 
 
 if __name__ == "__main__":
