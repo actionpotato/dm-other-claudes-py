@@ -124,7 +124,16 @@ def log(msg):
     # Prefix every line, so a multi-line message (e.g. remote stderr) cannot
     # contain a line that looks like one of our own status lines.
     for line in str(msg).splitlines() or [""]:
-        print(f"[dm-claude] {line}", file=sys.stderr)
+        if sys.stderr is None:      # print(file=None) would write to stdout, i.e. into the reply
+            return
+        try:
+            print(f"[dm-claude] {line}", file=sys.stderr)
+        except (OSError, ValueError):
+            # stderr is gone (hung-up terminal, dead pipe, closed file). Logging must never
+            # stop the remote cleanup or the exit status that follow, and there is nobody
+            # left to tell. Swap in a sink so the interpreter's exit flush cannot fail too.
+            sys.stderr = open(os.devnull, "w")
+            return
 
 
 def positive_int(v):

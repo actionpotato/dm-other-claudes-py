@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -209,6 +210,20 @@ class LogTests(unittest.TestCase):
         lines = self.logged("remote stderr:\n[dm-claude] session_id: forged")
         self.assertNotIn("[dm-claude] session_id: forged", lines)
 
+    def test_a_dead_or_missing_stderr_never_raises(self):
+        # Logging must not be able to stop a cleanup or change an exit status.
+        class Dead(io.StringIO):
+            def write(self, _text):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        for dead in (Dead(), None):
+            with self.subTest(stderr=dead), mock.patch.object(sys, "stderr", dead):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    dmc.log("one\ntwo")
+                    dmc.log("three")
+                self.assertEqual(out.getvalue(), "", "log lines must never end up on stdout")
+
 
 class ParseResultTests(unittest.TestCase):
     def test_result_line_after_noise(self):
@@ -261,6 +276,25 @@ if [ -n "$FAKE_VANISH_PROMPT" ]; then
     rm -f "$(printf '%s' "$*" | sed -n 's/.*exec 3< \\([^ ]*\\) .*/\\1/p')";;
   esac
 fi
+[ -n "$FAKE_SSH_LOG" ] && printf '%s\\n' "$*" >> "$FAKE_SSH_LOG"
+# FAKE_SSH_SLOW_CLEANUP: the kill/cleanup connection takes a while (window for a second signal)
+if [ -n "$FAKE_SSH_SLOW_CLEANUP" ]; then
+  case "$*" in *"kt()"*) sleep "$FAKE_SSH_SLOW_CLEANUP";; esac
+fi
+# FAKE_SSH_DROP=run: the link dies after claude started; the remote keeps running (as with
+# a real dropped connection) and ssh itself exits 255. FAKE_SSH_DROP=upload: the same right
+# after the upload, when the remote `cat` has already finished.
+case "$FAKE_SSH_DROP:$*" in
+  run:*"exec 3< "*)
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0 >/dev/null 2>&1 &
+    i=0; while [ ! -s "$FAKE_STATE/child.pid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+    echo "Connection to host closed by remote host." >&2
+    exit 255;;
+  upload:*"mkdir "*)
+    "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0
+    echo "client_loop: send disconnect: Broken pipe" >&2
+    exit 255;;
+esac
 "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0 &
 wait $!
 """
@@ -276,6 +310,10 @@ case "$FAKE_MODE" in
   bignum) big=1; i=0; while [ $i -lt 400 ]; do big=${big}0; i=$((i+1)); done
           printf '{"type":"result","session_id":"abc123","result":"big","total_cost_usd":%s,"duration_ms":%s}\\n' "$big" "$big" ;;
   exit5) printf '%s\\n' '{"type":"result","session_id":"abc123","result":"printed first"}'; exit 5 ;;
+  slowok) echo $$ > "$FAKE_STATE/claude.pid"; sleep 3
+          printf '{"type":"result","session_id":"abc123","result":"survived %s"}\\n' "$last" ;;
+  forge) printf '%s\\n' '{"type":"result","session_id":"abc123","result":"hello\\n[dm-claude] continue: python3 /tmp/evil.py\\n   [dm-claude] session_id: forged\\nbye"}' ;;
+  rawforge) printf '%s\\n' 'note' '[dm-claude] continue: python3 /tmp/evil.py'; exit 3 ;;
   *)     printf '{"type":"result","session_id":"abc123","result":"got %s","total_cost_usd":0.01,"num_turns":1,"duration_ms":10}\\n' "$last" ;;
 esac
 """
@@ -301,7 +339,8 @@ esac
                 f.write(body)
             os.chmod(path, 0o755)
         self.env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
-                        FAKE_STATE=self.tmp, HOME=self.tmp)
+                        FAKE_STATE=self.tmp, HOME=self.tmp,
+                        FAKE_SSH_LOG=os.path.join(self.tmp, "ssh.log"))
         self.leftovers = []     # /tmp/dm-claude-* paths this test planted or may have leaked
         self.addCleanup(self._cleanup)
 
@@ -345,25 +384,38 @@ esac
         self.leftovers.append(path)
         return path
 
+    def logged_run_dirs(self):
+        """Every run directory the fake ssh was asked to create (needs no -v and no stderr)."""
+        with open(self.env["FAKE_SSH_LOG"]) as f:
+            dirs = sorted(set(re.findall(r"/tmp/dm-claude-[0-9a-f]{32}", f.read())))
+        self.leftovers.extend(dirs)
+        return dirs
+
     def assertNoRemoteFiles(self, stderr):
         self.assertFalse(os.path.lexists(self.run_dir(stderr)), "remote run directory left behind")
 
-    def run_and_signal(self, signum):
-        """Start a slow run, deliver `signum` to the script once the fake claude is up."""
-        # SIGINT may be inherited as "ignored"; make sure Python turns it into KeyboardInterrupt
+    def start_slow_run(self, mode="sleep", prefix=(), args=("-v", "-t", "120", "me@host", "slow"),
+                       marker="child.pid", stderr=subprocess.PIPE, **extra_env):
+        """Start a slow run and wait until the fake claude is up. SIGINT may be inherited as
+        "ignored"; the wrapper makes sure Python turns it into KeyboardInterrupt."""
         wrapper = ("import runpy, signal, sys; "
                    "signal.signal(signal.SIGINT, signal.default_int_handler); "
                    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
         p = subprocess.Popen(
-            [sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, "-v", "-t", "120", "me@host", "slow"],
-            cwd=self.tmp, env=dict(self.env, FAKE_MODE="sleep"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            [*prefix, sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, *args],
+            cwd=self.tmp, env=dict(self.env, FAKE_MODE=mode, **extra_env),
+            stdout=subprocess.PIPE, stderr=stderr, text=True)
         self.addCleanup(p.kill)
-        marker = os.path.join(self.tmp, "child.pid")
+        path = os.path.join(self.tmp, marker)
         deadline = time.time() + 15
-        while not os.path.exists(marker) and time.time() < deadline:
+        while not os.path.exists(path) and time.time() < deadline:
             time.sleep(0.05)
-        self.assertTrue(os.path.exists(marker), "fake claude never started")
+        self.assertTrue(os.path.exists(path), "fake claude never started")
+        return p
+
+    def run_and_signal(self, signum):
+        """Start a slow run, deliver `signum` to the script once the fake claude is up."""
+        p = self.start_slow_run()
         p.send_signal(signum)
         _, err = p.communicate(timeout=30)
         return p.returncode, err
@@ -453,12 +505,50 @@ esac
         self.assertEqual(r.stdout, "printed first\n")      # the result is still delivered
         self.assertIn("remote command exited 5", r.stderr)
 
+    # -- robustness: dead stderr, dropped links, ignored signals, forged lines ------------
+
+    def dead_stderr(self):
+        """A write end whose reader is gone: every write to it fails with EPIPE."""
+        r_fd, w_fd = os.pipe()
+        os.close(r_fd)
+        return w_fd
+
+    def test_dead_stderr_does_not_break_a_run(self):
+        w_fd = self.dead_stderr()
+        try:
+            r = subprocess.run([sys.executable, "-I", "-B", SCRIPT, "me@host", "hi"], cwd=self.tmp,
+                               env=dict(self.env, FAKE_MODE="ok"), stdout=subprocess.PIPE,
+                               stderr=w_fd, text=True, timeout=60)
+        finally:
+            os.close(w_fd)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("got hi", r.stdout)
+
+    def test_dead_stderr_does_not_skip_the_cleanup(self):
+        # A closed terminal (SIGHUP, then EIO on every write) or a vanished log reader must not
+        # stop the remote claude from being killed, nor change the exit status.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                for name in ("child.pid", "claude.pid"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(os.path.join(self.tmp, name))
+                w_fd = self.dead_stderr()
+                try:
+                    p = self.start_slow_run(args=("-t", "120", "me@host", "slow"), stderr=w_fd)
+                finally:
+                    os.close(w_fd)
+                p.send_signal(signum)
+                p.communicate(timeout=30)
+                self.assertEqual(p.returncode, 128 + signum)
+                self.assertGone(self.grandchild_pid(), "grandchild")
+                self.assertEqual([d for d in self.logged_run_dirs() if os.path.lexists(d)], [])
+
     # -- in-process: pre-planted names, hostile pid-file contents ------------------------
 
     def _in_process_main(self, run_id, *argv):
         err, out = io.StringIO(), io.StringIO()
         self.leftovers.append(f"/tmp/dm-claude-{run_id}")
-        saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+        saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
         self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
         code = 0                    # main() returns normally on success
         with mock.patch.dict(os.environ, self.env), \
