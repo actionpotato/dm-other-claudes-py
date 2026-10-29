@@ -93,7 +93,7 @@ python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@s
 | `--max-turns <n>` | Limit how many tool-use turns the remote Claude can take |
 | `--model <model>` | Override the remote Claude's model |
 | `--remote-claude <path>` | Absolute path to `claude` on the remote, for when it is not on a non-interactive SSH `PATH` (e.g. Home Assistant) |
-| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable), e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`. Loader/shell variables such as `LD_PRELOAD` are refused |
+| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable); only allow-listed names are accepted, currently `CLAUDE_CONFIG_DIR` (e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`); anything else (`PATH`, `NODE_OPTIONS`, `ANTHROPIC_BASE_URL`, `LD_PRELOAD`, ...) is refused. Extend `REMOTE_ENV_ALLOW` in the script if you need more |
 | `-v, --verbose` | Debug output |
 
 ## How to Use From the TUI (Instructions for Claude)
