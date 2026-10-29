@@ -233,6 +233,39 @@ def try_parse_result(text):
         return None
 
 
+def remote_cleanup(target, run_dir, kill):
+    """Best-effort remote cleanup over a fresh ssh; returns the set of status words
+    the remote script printed, or None if it could not be reached / timed out.
+
+    With kill=True it first signals the process tree rooted at the recorded pid
+    (children bottom-up, so tool subprocesses claude spawned die too). Only a
+    plain decimal pid greater than 1 that is still running is ever signalled,
+    whatever the pid file holds; "killed" is only reported in that case.
+    """
+    script = f"rm -f {run_dir}/prompt {run_dir}/pid; rmdir {run_dir} 2>/dev/null || :"
+    if kill:
+        script = (
+            'kt() { for c in $(pgrep -P "$1" 2>/dev/null); do kt "$c"; done; kill "$1" 2>/dev/null; }; '
+            f"p=$(cat {run_dir}/pid 2>/dev/null); "
+            # Reject empty, leading-zero, non-digit and 9+ digit values. Linux pids have
+            # at most 7 digits; zsh and ksh truncate kill's argument to 32 bits, so
+            # "4294967296" would become 0, i.e. our own process group.
+            'case $p in ""|0*|*[!0-9]*|?????????*) p=;; esac; '
+            'if [ -n "$p" ] && [ "$p" -gt 1 ] && kill -0 "$p" 2>/dev/null; then '
+            'command -v pgrep >/dev/null 2>&1 || echo no-pgrep; kt "$p"; echo killed; '
+            'else echo no-pid; fi; ' + script
+        )
+    try:
+        r = subprocess.run(
+            SSH_BASE + ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+                        "--", target, script],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    return set(r.stdout.decode("utf-8", errors="replace").split()) if r.returncode == 0 else None
+
+
 def main():
     args = parse_args()
     target = args.target
@@ -241,23 +274,29 @@ def main():
 
     # Two-phase: upload prompt over stdin to a remote temp file, then run
     # claude reading from it. Avoids all shell escaping issues.
-    # Full 128-bit name; the remote writes it with umask 077 and noclobber
-    # (O_EXCL) so a pre-planted file or symlink can't be followed or read.
+    # Both files live in a per-run directory made by mkdir (atomic: it fails if the
+    # name already exists, as a file, FIFO, symlink or directory) with umask 077. No
+    # other user can then create, replace or read anything inside it. (Noclobber
+    # would not do: it only protects regular files, and writes through a FIFO or a
+    # symlink to a device.)
     run_id = uuid.uuid4().hex
-    tmp_file = f"/tmp/dm-claude-{run_id}.txt"
-    pid_file = f"/tmp/dm-claude-{run_id}.pid"
+    run_dir = f"/tmp/dm-claude-{run_id}"
+    tmp_file = f"{run_dir}/prompt"
+    pid_file = f"{run_dir}/pid"
 
     sid_note = f" (session {args.session[:12]}...)" if args.session else ""
     log(f"-> {target}{sid_note}")
     if args.verbose:
         log(f"cmd: {remote_cmd}")
         log(f"prompt: {len(full_prompt)} chars")
-        log(f"tmpFile: {tmp_file}")
+        log(f"runDir: {run_dir}")
 
     # Phase 1: upload prompt
     try:
         up = subprocess.run(
-            SSH_BASE + ["--", target, f"umask 077; set -C; cat > {tmp_file}"],
+            SSH_BASE + ["--", target,
+                        f"umask 077; mkdir {run_dir} || exit 1; "
+                        f"cat > {tmp_file} || {{ rm -f {tmp_file}; rmdir {run_dir}; exit 1; }}"],
             input=full_prompt.encode("utf-8"),
             capture_output=True,
             timeout=60,
@@ -276,10 +315,15 @@ def main():
         "-o", "ServerAliveInterval=30",
         "-o", "ServerAliveCountMax=20",
         "--", target,
-        # Open the prompt, unlink it immediately (so it never lingers), and exec
-        # claude in place so the recorded pid is claude's own and can be killed.
-        f"umask 077; echo $$ > {pid_file}; exec 3< {tmp_file}; rm -f {tmp_file}; "
-        f"trap 'rm -f {pid_file}' EXIT; {remote_cmd} <&3 3<&-",
+        # Arm the cleanup first: POSIX shells exit if `exec 3<` fails, and the
+        # trap must already be set when they do. Then record the shell's pid, open
+        # the prompt and unlink it immediately so it never lingers. The shell stays
+        # as claude's parent so the EXIT trap fires; on timeout remote_cleanup()
+        # walks its children.
+        f"umask 077; trap 'rm -f {tmp_file} {pid_file}; rmdir {run_dir} 2>/dev/null' EXIT; "
+        f"echo $$ > {pid_file} || exit 1; "
+        f"exec 3< {tmp_file} || exit 1; rm -f {tmp_file}; "
+        f"{remote_cmd} <&3 3<&-",
     ]
     try:
         run = subprocess.run(run_cmd, stdin=subprocess.DEVNULL,
@@ -287,20 +331,16 @@ def main():
     except subprocess.TimeoutExpired:
         log(f"TIMEOUT after {args.timeout}s, terminating remote...")
         # Killing local ssh doesn't stop the remote process (no pty), so do it explicitly.
-        # Walk the process tree bottom-up so tool subprocesses claude spawned die too.
-        kill = (f"kt() {{ for c in $(pgrep -P $1 2>/dev/null); do kt $c; done; kill $1 2>/dev/null; }}; "
-                f"p=$(cat {pid_file} 2>/dev/null); "
-                f"if [ -n \"$p\" ]; then kt $p; fi; "
-                f"rm -f {tmp_file} {pid_file}")
-        try:
-            subprocess.run(
-                SSH_BASE + ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-                            "--", target, kill],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
-            )
-            log("remote process terminated")
-        except subprocess.TimeoutExpired:
+        status = remote_cleanup(target, run_dir, kill=True)
+        if status is None:
             log(f"could not confirm remote cleanup; check {target} for a running claude")
+        elif "killed" not in status:
+            log("no live pid recorded on the remote (claude may already have exited); temp files removed")
+        elif "no-pgrep" in status:
+            log("signalled only the top-level remote shell (pgrep missing on the remote); "
+                f"check {target} for a stray claude")
+        else:
+            log("remote process tree signalled")
         sys.exit(124)
 
     stdout = run.stdout.decode("utf-8", errors="replace")
@@ -311,6 +351,10 @@ def main():
 
     if run.returncode != 0 and not stdout.strip():
         log(f"FAILED (exit {run.returncode}): {stderr.strip()}")
+        if run.returncode == 255:
+            # ssh itself failed (e.g. the link dropped after the upload): don't leave
+            # the prompt behind in the remote /tmp.
+            remote_cleanup(target, run_dir, kill=False)
         sys.exit(run.returncode or 1)
 
     parsed = try_parse_result(stdout)
