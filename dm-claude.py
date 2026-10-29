@@ -220,7 +220,7 @@ def try_parse_result(text):
     for line in reversed(lines):
         try:
             obj = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: absurdly nested JSON
             continue
         if isinstance(obj, dict) and (
             obj.get("type") == "result" or obj.get("session_id") or "result" in obj
@@ -229,7 +229,7 @@ def try_parse_result(text):
     try:
         obj = json.loads(text)
         return obj if isinstance(obj, dict) else None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -361,6 +361,9 @@ def main():
     if not parsed:
         log("warning: could not parse JSON, raw output follows")
         print(sanitize(stdout))
+        if run.returncode != 0:
+            log(f"remote command exited {run.returncode}")
+            sys.exit(run.returncode)
         return
 
     sid = parsed.get("session_id")
@@ -382,14 +385,22 @@ def main():
             extra += f" --model {shlex.quote(args.model)}"
         log(f'continue: python3 {shlex.quote(os.path.abspath(__file__))} -s {sid}{extra} {target} "follow-up"')
     if isinstance(cost, (int, float)):
-        d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
-        err = " ERROR" if is_error else ""
-        log(f"cost=${cost:.4f} turns={turns if isinstance(turns, int) else '?'} time={d}{err}")
+        try:
+            d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
+            err = " ERROR" if is_error else ""
+            log(f"cost=${cost:.4f} turns={turns if isinstance(turns, int) else '?'} time={d}{err}")
+        except OverflowError:   # an integer too big for a float: the reply is not ours to trust
+            log("cost/time not shown: numbers in the reply are out of range")
 
     print(sanitize(str(result)))
     if is_error:
         log(f"remote claude reported an error ({sanitize(str(parsed.get('subtype', 'unknown')))})")
         sys.exit(1)
+    if run.returncode != 0:
+        # A valid result line does not make a failed command a success (e.g. the remote
+        # shell was killed after claude printed it).
+        log(f"remote command exited {run.returncode}")
+        sys.exit(run.returncode)
 
 
 if __name__ == "__main__":
