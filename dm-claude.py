@@ -79,6 +79,8 @@ SSH_BASE = [
     "-o", "ConnectTimeout=10",
 ]
 
+# All patterns below are applied with fullmatch(): re.match() with a trailing "$"
+# also accepts a value followed by one "\n", which would slip a newline through.
 # A target starting with "-" would be parsed by ssh as an option
 # (e.g. -oProxyCommand=...), which is local command execution.
 TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:%\[\]-]*$")
@@ -140,21 +142,21 @@ def parse_args():
         log("Error: need <user@host> and a prompt (or -f <file>)")
         log("Run with -h for help")
         sys.exit(1)
-    if not TARGET_RE.match(args.target):
+    if not TARGET_RE.fullmatch(args.target):
         log(f"Error: invalid target {args.target!r} (expected user@host)")
         sys.exit(1)
-    if args.remote_claude and not REMOTE_BIN_RE.match(args.remote_claude):
+    if args.remote_claude and not REMOTE_BIN_RE.fullmatch(args.remote_claude):
         log("Error: --remote-claude must be an absolute path (letters, digits, _ . / + -)")
         sys.exit(1)
     for kv in args.remote_env:
         key, sep, _ = kv.partition("=")
-        if not sep or not ENV_KEY_RE.match(key) or ENV_DENY_RE.match(key):
+        if not sep or not ENV_KEY_RE.fullmatch(key) or ENV_DENY_RE.fullmatch(key):
             log(f"Error: invalid or disallowed --remote-env {key!r}")
             sys.exit(1)
-    if args.model and not MODEL_RE.match(args.model):
+    if args.model and not MODEL_RE.fullmatch(args.model):
         log("Error: invalid model name")
         sys.exit(1)
-    if args.session and not SESSION_RE.match(args.session):
+    if args.session and not SESSION_RE.fullmatch(args.session):
         log("Error: invalid session id")
         sys.exit(1)
     return args
@@ -187,7 +189,8 @@ def build_remote_cmd(args):
         parts += ["--max-turns", str(args.max_turns)]
     if args.model:
         parts += ["--model", args.model]
-    env = [f"{k}={shlex.quote(v)}" for k, _, v in (kv.partition("=") for kv in args.remote_env)]
+    env = [f"{shlex.quote(k)}={shlex.quote(v)}"
+           for k, _, v in (kv.partition("=") for kv in args.remote_env)]
     return " ".join(env + [shlex.quote(x) for x in parts])
 
 
@@ -297,7 +300,7 @@ def main():
         return
 
     sid = parsed.get("session_id")
-    if not isinstance(sid, str) or not SESSION_RE.match(sid):
+    if not isinstance(sid, str) or not SESSION_RE.fullmatch(sid):
         sid = None
     result = parsed.get("result", parsed.get("text", ""))
     if result is None:
