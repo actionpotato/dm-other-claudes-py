@@ -88,13 +88,13 @@ python3 ~/.claude/skills/dm-other-claudes/dm-claude.py --skip-permissions user@s
 | Flag | Description |
 |------|-------------|
 | `-s, --session <id>` | Resume a previous session on the remote |
-| `-t, --timeout <sec>` | Timeout in seconds (default: 600 / 10min) |
+| `-t, --timeout <sec>` | Timeout for the remote run in seconds (default: 600 / 10min); the upload (60 s) and each cleanup (30 s) have fixed limits |
 | `-f, --file <path>` | Read prompt from a file (`-` for standard input, e.g. a quoted heredoc, which avoids shell-quoting a long or multi-line prompt) |
 | `--skip-permissions` | Add `--dangerously-skip-permissions` on remote (opt-in: gives the remote Claude unrestricted shell access, see Important Notes) |
 | `--max-turns <n>` | Limit how many tool-use turns the remote Claude can take |
 | `--model <model>` | Override the remote Claude's model |
 | `--remote-claude <path>` | Absolute path to `claude` on the remote, for when it is not on a non-interactive SSH `PATH` (e.g. Home Assistant) |
-| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable); only allow-listed names are accepted, currently `CLAUDE_CONFIG_DIR` (e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`); anything else (`PATH`, `NODE_OPTIONS`, `ANTHROPIC_BASE_URL`, `LD_PRELOAD`, ...) is refused. Extend `REMOTE_ENV_ALLOW` in the script if you need more |
+| `--remote-env KEY=VALUE` | Set an environment variable for remote claude (repeatable); only allow-listed names are accepted, currently `CLAUDE_CONFIG_DIR` (e.g. `CLAUDE_CONFIG_DIR=/config/.claude-ssh`), whose value must be a plain path (letters, digits, space and `_ . / + @ : % = -`); anything else (`PATH`, `NODE_OPTIONS`, `ANTHROPIC_BASE_URL`, `LD_PRELOAD`, ...) is refused. Extend `REMOTE_ENV_ALLOW` in the script if you need more |
 | `-v, --verbose` | Debug output |
 
 ## How to Use From the TUI (Instructions for Claude)
