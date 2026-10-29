@@ -10,8 +10,8 @@ Born from the annoyance of manually relaying messages between Claude Code sessio
 ┌─────────────────┐         SSH + stdin          ┌─────────────────┐
 │  Claude Code    │ ──────────────────────────>  │  Claude Code    │
 │  (interactive)  │                              │  (headless)     │
-│  your laptop    │  <────────────────────────── │  remote server   │
-│                 │     JSON response + session   │                 │
+│  your laptop    │  <────────────────────────── │  remote server  │
+│                 │     JSON response + session  │                 │
 └─────────────────┘                              └─────────────────┘
 ```
 
