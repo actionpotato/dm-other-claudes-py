@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import uuid
@@ -269,6 +270,50 @@ def remote_cleanup(target, run_dir, kill):
     return set(r.stdout.decode("utf-8", errors="replace").split()) if r.returncode == 0 else None
 
 
+def kill_remote(target, run_dir):
+    """Stop the remote run and say truthfully what happened."""
+    status = remote_cleanup(target, run_dir, kill=True)
+    if status is None:
+        log(f"could not confirm remote cleanup; check {target} for a running claude")
+    elif "killed" not in status:
+        log("no live pid recorded on the remote (claude may already have exited); temp files removed")
+    elif "no-pgrep" in status:
+        log("signalled only the top-level remote shell (pgrep missing on the remote); "
+            f"check {target} for a stray claude")
+    else:
+        log("remote process tree signalled")
+
+
+class Interrupted(Exception):
+    """Raised from a signal handler so the remote can be cleaned up before we exit."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _raise_interrupted(signum, _frame):
+    raise Interrupted(signum)
+
+
+def set_signal_handlers(handler):
+    # SIGINT already raises KeyboardInterrupt. SIGTERM (kill, a caller's tool timeout) and
+    # SIGHUP (closed terminal) would otherwise end us at once and leave the remote claude
+    # running with nobody to read its answer. SIGHUP does not exist on Windows.
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, handler)
+
+
+def interrupt_exit_code(exc):
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return 124
+    if isinstance(exc, KeyboardInterrupt):
+        return 130
+    return 128 + exc.signum
+
+
 def explain_exit(code):
     if code == 127:
         log("hint: claude may not be on the remote's non-interactive PATH; "
@@ -320,6 +365,8 @@ def main():
         log(f"prompt: {len(full_prompt)} chars")
         log(f"runDir: {run_dir}")
 
+    set_signal_handlers(_raise_interrupted)
+
     # Phase 1: upload prompt
     try:
         up = subprocess.run(
@@ -333,6 +380,11 @@ def main():
     except subprocess.TimeoutExpired:
         log("SSH connection failed: upload timed out")
         sys.exit(1)
+    except (KeyboardInterrupt, Interrupted) as e:
+        set_signal_handlers(signal.SIG_DFL)
+        log("interrupted during upload, removing the prompt from the remote...")
+        remote_cleanup(target, run_dir, kill=False)
+        sys.exit(interrupt_exit_code(e))
     if up.returncode != 0:
         log(f"SSH connection failed: {sanitize(up.stderr.decode(errors='replace')).strip()}")
         sys.exit(1)
@@ -357,20 +409,16 @@ def main():
     try:
         run = subprocess.run(run_cmd, stdin=subprocess.DEVNULL,
                              capture_output=True, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        log(f"TIMEOUT after {args.timeout}s, terminating remote...")
-        # Killing local ssh doesn't stop the remote process (no pty), so do it explicitly.
-        status = remote_cleanup(target, run_dir, kill=True)
-        if status is None:
-            log(f"could not confirm remote cleanup; check {target} for a running claude")
-        elif "killed" not in status:
-            log("no live pid recorded on the remote (claude may already have exited); temp files removed")
-        elif "no-pgrep" in status:
-            log("signalled only the top-level remote shell (pgrep missing on the remote); "
-                f"check {target} for a stray claude")
+    except (subprocess.TimeoutExpired, KeyboardInterrupt, Interrupted) as e:
+        set_signal_handlers(signal.SIG_DFL)  # a second signal ends us at once
+        if isinstance(e, subprocess.TimeoutExpired):
+            log(f"TIMEOUT after {args.timeout}s, terminating remote...")
         else:
-            log("remote process tree signalled")
-        sys.exit(124)
+            log("interrupted, terminating remote...")
+        # Killing local ssh doesn't stop the remote process (no pty), so do it explicitly.
+        kill_remote(target, run_dir)
+        sys.exit(interrupt_exit_code(e))
+    set_signal_handlers(signal.SIG_DFL)
 
     stdout = run.stdout.decode("utf-8", errors="replace")
     stderr = sanitize(run.stderr.decode("utf-8", errors="replace"))

@@ -226,6 +226,24 @@ class ParseResultTests(unittest.TestCase):
         self.assertIsNone(dmc.try_parse_result("[" * 200000))
 
 
+class KillRemoteTests(unittest.TestCase):
+    """kill_remote() must say what happened, not what was hoped for."""
+
+    def say(self, status):
+        err = io.StringIO()
+        with mock.patch.object(dmc, "remote_cleanup", return_value=status), contextlib.redirect_stderr(err):
+            dmc.kill_remote("me@host", "/tmp/dm-claude-x")
+        return err.getvalue()
+
+    def test_message_matches_the_outcome(self):
+        self.assertIn("could not confirm", self.say(None))
+        self.assertIn("no live pid recorded", self.say({"no-pid"}))
+        self.assertIn("only the top-level remote shell", self.say({"killed", "no-pgrep"}))
+        self.assertIn("remote process tree signalled", self.say({"killed"}))
+        for status in (None, {"no-pid"}, {"killed", "no-pgrep"}):
+            self.assertNotIn("remote process tree signalled", self.say(status))
+
+
 @unittest.skipUnless(os.name == "posix" and os.path.exists("/bin/sh"), "needs a POSIX sh")
 class FakeRemoteTests(unittest.TestCase):
     """End-to-end runs against a fake ssh/claude on PATH."""
@@ -237,6 +255,12 @@ while [ $# -gt 0 ]; do
   case "$1" in --) shift; break;; -o) shift 2;; *) shift;; esac
 done
 shift   # target
+# FAKE_VANISH_PROMPT: delete this run's prompt just before phase 2 opens it
+if [ -n "$FAKE_VANISH_PROMPT" ]; then
+  case "$*" in *"exec 3< "*)
+    rm -f "$(printf '%s' "$*" | sed -n 's/.*exec 3< \\([^ ]*\\) .*/\\1/p')";;
+  esac
+fi
 "${FAKE_REMOTE_SH:-/bin/sh}" -c "$*" <&0 &
 wait $!
 """
@@ -324,6 +348,26 @@ esac
     def assertNoRemoteFiles(self, stderr):
         self.assertFalse(os.path.lexists(self.run_dir(stderr)), "remote run directory left behind")
 
+    def run_and_signal(self, signum):
+        """Start a slow run, deliver `signum` to the script once the fake claude is up."""
+        # SIGINT may be inherited as "ignored"; make sure Python turns it into KeyboardInterrupt
+        wrapper = ("import runpy, signal, sys; "
+                   "signal.signal(signal.SIGINT, signal.default_int_handler); "
+                   "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        p = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, "-v", "-t", "120", "me@host", "slow"],
+            cwd=self.tmp, env=dict(self.env, FAKE_MODE="sleep"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(p.kill)
+        marker = os.path.join(self.tmp, "child.pid")
+        deadline = time.time() + 15
+        while not os.path.exists(marker) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(marker), "fake claude never started")
+        p.send_signal(signum)
+        _, err = p.communicate(timeout=30)
+        return p.returncode, err
+
     def test_roundtrip_and_cleanup(self):
         for shell in remote_shells():
             with self.subTest(shell=shell):
@@ -339,6 +383,21 @@ esac
         self.assertIn("remote process tree signalled", r.stderr)
         self.assertGone(self.grandchild_pid(), "grandchild")
         self.assertNoRemoteFiles(r.stderr)
+
+    def test_signals_stop_the_remote_too(self):
+        # Ctrl-C, `kill`, a closed terminal, or a caller's own tool timeout must not leave
+        # the remote claude running (and spending tokens) with its result thrown away.
+        for signum, expect in ((signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGHUP, 128 + signal.SIGHUP),
+                               (signal.SIGINT, 130)):
+            with self.subTest(signal=signum.name):
+                for name in ("child.pid", "claude.pid"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(os.path.join(self.tmp, name))
+                code, err = self.run_and_signal(signum)
+                self.assertEqual(code, expect, err)
+                self.assertIn("remote process tree signalled", err)
+                self.assertGone(self.grandchild_pid(), "grandchild")
+                self.assertNoRemoteFiles(err)
 
     def test_non_json_failure_keeps_exit_status(self):
         r = self.run_script("me@host", "x", mode="plain")
@@ -358,6 +417,15 @@ esac
         r = self.run_script("me@host", "x", mode="maxturns")
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("error_max_turns", r.stderr)
+
+    def test_failure_after_upload_leaves_no_files_on_the_remote(self):
+        # The prompt is gone when phase 2 opens it. dash and bash exit on that redirection
+        # error, so the EXIT trap must already be armed or the pid file and directory leak.
+        for shell in remote_shells():
+            with self.subTest(shell=shell):
+                r = self.run_script("-v", "me@host", "x", FAKE_VANISH_PROMPT="1", FAKE_REMOTE_SH=shell)
+                self.assertNotEqual(r.returncode, 0, r.stderr)
+                self.assertNoRemoteFiles(r.stderr)
 
     def test_error_subtype_is_sanitized_and_cannot_forge_status_lines(self):
         r = self.run_script("me@host", "x", mode="err")

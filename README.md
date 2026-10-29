@@ -115,7 +115,7 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 1. **Phase 1 — Upload**: A private directory `/tmp/dm-claude-<random>/` is created on the remote and the prompt is uploaded into it via `ssh ... cat > /tmp/dm-claude-<random>/prompt`. This avoids all shell escaping issues.
 2. **Phase 2 — Execute**: Claude runs headlessly reading from that file: `claude -p --output-format json < /tmp/dm-claude-<random>/prompt`
 3. **Parse**: The JSON response is parsed for the result text, session ID, cost, and duration.
-4. **Cleanup**: The prompt file is deleted as soon as claude has opened it, and the pid file and directory when the run ends. If the run times out, `dm-claude.py` also stops the remote claude and its child processes (exit code 124) instead of leaving it running unattended.
+4. **Cleanup**: The prompt file is deleted as soon as claude has opened it, and the pid file and directory when the run ends. If the run times out or `dm-claude.py` receives Ctrl-C, `SIGTERM` or `SIGHUP`, it also stops the remote claude and its child processes (exit codes 124, 130 and 128+signal) instead of leaving it running unattended.
 
 For new conversations, a preamble is prepended explaining to the remote Claude that it's receiving a cross-Claude task. On follow-ups (`--session`), the preamble is skipped since the remote already has context.
 
@@ -134,7 +134,7 @@ For new conversations, a preamble is prepended explaining to the remote Claude t
 python3 -m unittest discover -s tests -v
 ```
 
-Offline, standard library only, under half a minute. The unit tests cover the input validators, the output sanitizer, `log()`, the remote command builder and the reply parser. The integration tests put a fake `ssh` (which runs the command string in a local shell, as the remote would; every one of `sh`, `dash`, `bash`, `zsh` and `ksh` that is installed gets a turn as the remote login shell, because they differ in what this script relies on) and a fake `claude` first on `PATH`, then check the normal round trip, the timeout kill of the whole process tree, that a pre-planted FIFO, symlink or directory at the run-directory name is refused, and that hostile pid-file contents are handled safely. Nothing touches the network; the tests write only to a temp directory and to `/tmp/dm-claude-<random>/`.
+Offline, standard library only, under half a minute. The unit tests cover the input validators, the output sanitizer, `log()`, the remote command builder and the reply parser. The integration tests put a fake `ssh` (which runs the command string in a local shell, as the remote would; every one of `sh`, `dash`, `bash`, `zsh` and `ksh` that is installed gets a turn as the remote login shell, because they differ in what this script relies on) and a fake `claude` first on `PATH`, then check the normal round trip, the timeout kill of the whole process tree (and the same for Ctrl-C, `SIGTERM` and `SIGHUP`, with no files left behind), that a pre-planted FIFO, symlink or directory at the run-directory name is refused, and that hostile pid-file contents are handled safely. Nothing touches the network; the tests write only to a temp directory and to `/tmp/dm-claude-<random>/`.
 
 ## Tips
 

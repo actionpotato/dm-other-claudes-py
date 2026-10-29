@@ -152,7 +152,7 @@ On follow-up messages (`--session`), no preamble is added — the remote Claude 
 
 2. **Use IP addresses if hostname resolution is unreliable** — if you have flaky DNS, use the IP directly (e.g., `user@192.168.1.100` instead of `user@myserver`)
 
-3. **Timeout** — default is 10 minutes. For long tasks, increase with `-t 1200` or more
+3. **Timeout** — default is 10 minutes. For long tasks, increase with `-t 1200` or more. The Bash tool that runs this command has its own, separate timeout (2 minutes unless raised, 10 at most). If that fires first, `dm-claude.py` is terminated: it stops the remote claude on the way out, but the reply is lost. For anything that may take more than a minute or two, use the Bash tool's `run_in_background`, or set its timeout above `-t` plus about 90 seconds (upload and cleanup)
 
 4. **Session IDs live on the remote machine** — they reference Claude sessions stored in `~/.claude/` on the remote host. The session ID only works with the same `user@host`
 
