@@ -30,6 +30,8 @@ import subprocess
 import sys
 import uuid
 
+DEFAULT_TIMEOUT = 600
+
 PREAMBLE = """[CROSS-CLAUDE COMMUNICATION]
 You are receiving this message from another Claude Code instance via the "dm-claude" tool.
 The calling Claude is running interactively in a TUI with a human user.
@@ -139,8 +141,8 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-s", "--session", help="Resume a previous session")
-    p.add_argument("-t", "--timeout", type=positive_int, default=600,
-                   help="SSH/command timeout in seconds (default: 600)")
+    p.add_argument("-t", "--timeout", type=positive_int, default=DEFAULT_TIMEOUT,
+                   help=f"SSH/command timeout in seconds (default: {DEFAULT_TIMEOUT})")
     p.add_argument("-f", "--file", dest="prompt_file", help="Read prompt from file")
     p.add_argument("--skip-permissions", action="store_true",
                    help="Add --dangerously-skip-permissions on remote")
@@ -267,6 +269,32 @@ def remote_cleanup(target, run_dir, kill):
     return set(r.stdout.decode("utf-8", errors="replace").split()) if r.returncode == 0 else None
 
 
+def explain_exit(code):
+    if code == 127:
+        log("hint: claude may not be on the remote's non-interactive PATH; "
+            "try --remote-claude /absolute/path/to/claude")
+
+
+def continue_command(args, sid):
+    """The command that continues this conversation, with every flag it needs to reach the
+    same remote claude (--remote-claude / --remote-env decide which binary and config dir)."""
+    cmd = ["python3", os.path.abspath(__file__), "-s", sid]
+    if args.timeout != DEFAULT_TIMEOUT:
+        cmd += ["-t", str(args.timeout)]
+    if args.skip_permissions:
+        cmd.append("--skip-permissions")
+    if args.max_turns is not None:
+        cmd += ["--max-turns", str(args.max_turns)]
+    if args.model:
+        cmd += ["--model", args.model]
+    if args.remote_claude:
+        cmd += ["--remote-claude", args.remote_claude]
+    for kv in args.remote_env:
+        cmd += ["--remote-env", kv]
+    cmd.append(args.target)
+    return " ".join(shlex.quote(x) for x in cmd) + ' "follow-up"'
+
+
 def main():
     args = parse_args()
     target = args.target
@@ -352,6 +380,7 @@ def main():
 
     if run.returncode != 0 and not stdout.strip():
         log(f"FAILED (exit {run.returncode}): {stderr.strip()}")
+        explain_exit(run.returncode)
         if run.returncode == 255:
             # ssh itself failed (e.g. the link dropped after the upload): don't leave
             # the prompt behind in the remote /tmp.
@@ -364,6 +393,9 @@ def main():
         print(sanitize(stdout))
         if run.returncode != 0:
             log(f"remote command exited {run.returncode}")
+            if stderr.strip() and not args.verbose:  # -v already showed it
+                log(f"remote stderr:\n{stderr.strip()}")
+            explain_exit(run.returncode)
             sys.exit(run.returncode)
         return
 
@@ -373,7 +405,11 @@ def main():
     result = parsed.get("result", parsed.get("text", ""))
     if result is None:
         result = ""
-    is_error = bool(parsed.get("is_error"))
+    # Claude Code's failure results (e.g. subtype "error_max_turns") have no "result" text
+    # and may not set is_error, so the subtype counts too.
+    subtype = parsed.get("subtype")
+    subtype = subtype if isinstance(subtype, str) else ""
+    is_error = bool(parsed.get("is_error")) or subtype.startswith("error")
     cost = parsed.get("cost_usd", parsed.get("total_cost_usd"))
     turns = parsed.get("num_turns")
     duration = parsed.get("duration_ms")
@@ -381,10 +417,7 @@ def main():
     # Metadata to stderr, response text to stdout
     if sid:
         log(f"session_id: {sid}")
-        extra = " --skip-permissions" if args.skip_permissions else ""
-        if args.model:
-            extra += f" --model {shlex.quote(args.model)}"
-        log(f'continue: python3 {shlex.quote(os.path.abspath(__file__))} -s {sid}{extra} {target} "follow-up"')
+        log(f"continue: {continue_command(args, sid)}")
     if isinstance(cost, (int, float)):
         try:
             d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
@@ -395,7 +428,7 @@ def main():
 
     print(sanitize(str(result)))
     if is_error:
-        log(f"remote claude reported an error ({sanitize(str(parsed.get('subtype', 'unknown')))})")
+        log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
         sys.exit(1)
     if run.returncode != 0:
         # A valid result line does not make a failed command a success (e.g. the remote
