@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -81,14 +82,15 @@ exit status:
   1      an argument refused by our own checks, the upload failed, or the remote claude
          reported an error or printed nothing
   2      the command line was not understood (unknown flag, bad number)
+  120    python could not flush stdout (for example a closed pipe): replaces the status the
+         run would have had
   124    timed out (-t); SIGTERM is sent to the remote claude (best effort; the log says what was found)
-  130    interrupted with Ctrl-C; SIGTERM is sent to the remote claude (best effort; the log says what was found)
-  129, 143   killed by SIGHUP / SIGTERM (128 + signal); SIGTERM is sent to the remote claude (best effort; the log says what was found)
+  130    interrupted with Ctrl-C; SIGTERM is sent to the remote claude, or the uploaded prompt is removed if the upload was still running (best effort; the log says which)
+  129, 143   killed by SIGHUP / SIGTERM (128 + signal); SIGTERM is sent to the remote claude, or the uploaded prompt is removed if the upload was still running (best effort; the log says which)
   255    ssh itself failed (connection lost, host key changed, killed by a signal, ...);
          SIGTERM is sent to the remote claude (best effort; the log says what was found)
-  other  the remote command's own status (127: claude not found on the remote's PATH;
-         120: python could not flush stdout); one that equals a code above cannot be
-         told apart from it
+  other  the remote command's own status (127: claude not found on the remote's PATH);
+         one that equals a code above cannot be told apart from it
 """
 
 # accept-new trusts a host on first contact but refuses if its key later changes
@@ -359,6 +361,13 @@ def kill_remote(target, run_dir):
         log("remote process tree signalled")
 
 
+def remove_remote_leftovers(target, run_dir):
+    """The cleanup for paths where no claude is running over there, only a prompt may be. It is a
+    second chance, so when it fails too (the link is still down) say where the prompt is."""
+    if remote_cleanup(target, run_dir, kill=False) is None:
+        log(f"could not confirm the remote cleanup; the prompt may still be in {target}:{run_dir}")
+
+
 class Interrupted(Exception):
     """Raised from a signal handler so the remote can be cleaned up before we exit."""
 
@@ -467,17 +476,19 @@ def main():
     except subprocess.TimeoutExpired:
         log("SSH connection failed: upload timed out")
         end_at_next_signal()
-        remote_cleanup(target, run_dir, kill=False)     # part of the prompt may be there
+        remove_remote_leftovers(target, run_dir)        # part of the prompt may be there
         sys.exit(1)
     except (KeyboardInterrupt, Interrupted) as e:
         end_at_next_signal()
         log("interrupted during upload, removing the prompt from the remote...")
-        remote_cleanup(target, run_dir, kill=False)
+        remove_remote_leftovers(target, run_dir)
         sys.exit(interrupt_exit_code(e))
     if up.returncode != 0:
         detail = sanitize(up.stderr.decode(errors="replace")).strip()
         if up.returncode < 0:
             detail = f"ssh was killed by signal {-up.returncode}" + (f": {detail}" if detail else "")
+        elif not detail:
+            detail = f"ssh exited with status {up.returncode}"
         log(f"SSH connection failed: {detail}")
         if up.returncode != 1:
             # ssh itself failed (255), was killed, or ended with some other status, possibly
@@ -485,7 +496,7 @@ def main():
             # remote script's own: it cleaned up, or mkdir refused a name that is not ours
             # to touch.)
             end_at_next_signal()
-            remote_cleanup(target, run_dir, kill=False)
+            remove_remote_leftovers(target, run_dir)
         sys.exit(1)
     if args.verbose:
         log(f"prompt uploaded to {target}:{tmp_file}")
@@ -541,16 +552,24 @@ def main():
         else:
             # The remote script's own EXIT trap cleans up when it ran at all. If the login
             # shell rejected the command it never did, and the prompt is still over there.
-            remote_cleanup(target, run_dir, kill=False)
+            remove_remote_leftovers(target, run_dir)
 
     if rc != 0 and not stdout.strip():
         log(f"FAILED (exit {rc}): {stderr.strip()}")
         explain_exit(rc)
         clean_up_after_failure()
         sys.exit(rc)
-    if rc != 0:
-        # Output arrived first (a login banner, part of a reply) and the command still failed.
-        clean_up_after_failure()
+
+    def finish(code):
+        """Leave with `code`. Output has arrived (a login banner, part of a reply, a whole one) and
+        the command still failed: show it first and clean up last, because the cleanup is another
+        connection that can be slow, or never finish if the link is down."""
+        if rc != 0:
+            with contextlib.suppress(OSError, ValueError):      # a closed stdout must not skip the cleanup
+                sys.stdout.flush()
+            clean_up_after_failure()
+        sys.exit(code)
+
     if not stdout.strip():
         # Only exit 0 gets here: the remote command succeeded and said nothing.
         log("the remote command exited 0 but printed nothing"
@@ -566,7 +585,7 @@ def main():
             if stderr.strip() and not args.verbose:  # -v already showed it
                 log(f"remote stderr:\n{stderr.strip()}")
             explain_exit(rc)
-            sys.exit(rc)
+            finish(rc)
         return
 
     sid = parsed.get("session_id")
@@ -599,12 +618,12 @@ def main():
     print(reply_text(str(result)))
     if is_error:
         log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
-        sys.exit(1)
+        finish(1)
     if rc != 0:
         # A valid result line does not make a failed command a success (e.g. the remote
         # shell was killed after claude printed it).
         log(f"remote command exited {rc}")
-        sys.exit(rc)
+        finish(rc)
 
 
 if __name__ == "__main__":

@@ -120,18 +120,19 @@ python3 dm-claude.py --model claude-sonnet-4-6 -t 1200 user@server "long analysi
 | 0 | the remote claude answered |
 | 1 | an argument refused by the script's own checks, the upload failed, or the remote claude reported an error (including a result whose `subtype` starts with `error`, such as `error_max_turns`) or printed nothing |
 | 2 | the command line was not understood (unknown flag, bad number): argparse's own status |
+| 120 | Python could not flush standard output (for example `\| head` closed it): this replaces the status the run would have had |
 | 124 | timed out (`-t`); `SIGTERM` is sent to the remote claude (best effort; the log says what was found) |
-| 130 | interrupted with Ctrl-C; `SIGTERM` is sent to the remote claude (best effort; the log says what was found) |
-| 129, 143 | killed by `SIGHUP` / `SIGTERM` (128 + signal); `SIGTERM` is sent to the remote claude (best effort; the log says what was found) |
+| 130 | interrupted with Ctrl-C; `SIGTERM` is sent to the remote claude, or the uploaded prompt is removed if the upload was still running (best effort; the log says which) |
+| 129, 143 | killed by `SIGHUP` / `SIGTERM` (128 + signal); `SIGTERM` is sent to the remote claude, or the uploaded prompt is removed if the upload was still running (best effort; the log says which) |
 | 255 | ssh itself failed (connection lost, host key changed, ssh killed by a signal, ...); `SIGTERM` is sent to the remote claude (best effort; the log says what was found) |
-| other | the remote command's own status, also when it printed non-JSON or a valid result and then failed (127: `claude` not found on the remote's `PATH`; 120: Python could not flush standard output). A remote status equal to a code above cannot be told apart from it |
+| other | the remote command's own status, also when it printed non-JSON or a valid result and then failed (127: `claude` not found on the remote's `PATH`). A remote status equal to a code above cannot be told apart from it |
 
 ## How It Works
 
 1. **Phase 1 — Upload**: A private directory `/tmp/dm-claude-<random>/` is created on the remote and the prompt is uploaded into it via `ssh ... cat > /tmp/dm-claude-<random>/prompt`. This avoids all shell escaping issues.
 2. **Phase 2 — Execute**: Claude runs headlessly reading from that file: `claude -p --output-format json < /tmp/dm-claude-<random>/prompt`. Every remote command is `/bin/sh -c '<script>'`, so the remote login shell can be bash, zsh, csh or tcsh (fish is untested).
 3. **Parse**: The JSON response is parsed for the result text, session ID, cost, and duration.
-4. **Cleanup**: The remote shell opens the prompt file and deletes it before claude starts; the pid file and the directory go when the run ends. If the run times out, `dm-claude.py` receives Ctrl-C, `SIGTERM` or `SIGHUP`, or ssh itself fails mid-run (exit 255, also when something was printed first, or when ssh was killed by a signal), it also sends `SIGTERM` to the remote claude and its child processes (exit codes 124, 130, 128+signal and 255) instead of leaving it running unattended; a failure before the remote script starts (for example a login shell that rejects the command) removes the uploaded prompt. A signal that was ignored when the script started (`nohup`) stays ignored.
+4. **Cleanup**: The remote shell opens the prompt file and deletes it before claude starts; the pid file and the directory go when the run ends. If the run times out, `dm-claude.py` receives Ctrl-C, `SIGTERM` or `SIGHUP`, or ssh itself fails mid-run (exit 255, also when something was printed first, or when ssh was killed by a signal), it also sends `SIGTERM` to the remote claude and its child processes (exit codes 124, 130, 128+signal and 255) instead of leaving it running unattended; a failure before the remote script starts (for example a login shell that rejects the command), or an upload that fails or is interrupted, removes the uploaded prompt instead. When that cleanup connection fails as well, the log says where the prompt may still be. A reply that arrived before a failure is printed first, and the cleanup comes after it. A signal that was ignored when the script started (`nohup`) stays ignored.
 
 For new conversations, a preamble is prepended explaining to the remote Claude that it's receiving a cross-Claude task. On follow-ups (`--session`), the preamble is skipped since the remote already has context.
 
@@ -168,7 +169,7 @@ Things this tool does not do, so you can decide whether they matter for your use
 - **Standard output closed early** (`| head`): after the remote run has finished, a long reply ends in a `BrokenPipeError` traceback (exit 1) and a short one in Python's "Exception ignored" message (exit 120).
 - **A banner and a silent claude:** if the remote login prints text and `claude` then prints nothing and exits 0, the banner is shown as the reply after a "could not parse JSON" warning, with exit 0. Only completely empty output counts as a failure.
 - **`--remote-env` values are strict:** anything outside the plain-path characters (accents, `~`, parentheses, commas) is refused rather than guessed at; point `CLAUDE_CONFIG_DIR` at a symlink to such a directory.
-- **A failed run costs one more connection:** after any non-zero status the script connects again to remove what the remote script may not have (about 10 s if the host is unreachable, 30 s at most).
+- **A failed run usually costs one more connection:** after a failure the script connects again to remove what the remote script may not have (about 10 s if the host is unreachable, 30 s at most). It does not when it refused an argument itself or when the upload failed on the remote side before anything was created.
 - **Exit status 2 is not ours:** argparse uses it for an unknown flag or a bad number, while the script's own checks use 1.
 - **Invisible characters that legitimate text needs** (ZWNJ, ZWJ, LRM, RLM, variation selectors) are not stripped, and plain-text prompt injection in a reply cannot be filtered at all. Treat replies as untrusted data.
 - **The private run directory relies on `/tmp` being sticky,** as it normally is.
