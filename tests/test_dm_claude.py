@@ -423,6 +423,8 @@ case "$FAKE_MODE" in
   bignum) big=1; i=0; while [ $i -lt 400 ]; do big=${big}0; i=$((i+1)); done
           printf '{"type":"result","session_id":"abc123","result":"big","total_cost_usd":%s,"duration_ms":%s}\\n' "$big" "$big" ;;
   exit5) printf '%s\\n' '{"type":"result","session_id":"abc123","result":"printed first"}'; exit 5 ;;
+  big5)  printf '{"type":"result","session_id":"abc123","result":"'; head -c 200000 /dev/zero | tr '\\0' x; printf '"}\\n'; exit 5 ;;
+  uni5)  printf '%s\\n' '{"type":"result","session_id":"abc123","result":"caf\\u00e9 \\u4e2d"}'; exit 5 ;;
   errexit) printf '%s\\n' '{"type":"result","is_error":true,"subtype":"error_during_execution","result":"boom"}'; exit 3 ;;
   slowok) echo $$ > "$FAKE_STATE/claude.pid"; sleep 3
           printf '{"type":"result","session_id":"abc123","result":"survived %s"}\\n' "$last" ;;
@@ -460,6 +462,8 @@ esac
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
+        with contextlib.suppress(OSError):
+            self.logged_run_dirs()
         for name in ("child.pid", "claude.pid"):
             try:
                 with open(os.path.join(self.tmp, name)) as f:
@@ -911,6 +915,45 @@ esac
                 self.assertEqual(r.returncode, code, r.stderr)
                 self.assertEqual(self.ssh_calls(), calls, r.stderr)
                 self.logged_run_dirs()
+
+    def run_with_closed_stdout(self, *args, mode, **extra_env):
+        """`script ... >&-`: Python starts with no stdout at all (sys.stdout is None)."""
+        return subprocess.run(["/bin/sh", "-c", 'exec "$@" >&-', "sh", sys.executable, "-I", "-B", SCRIPT, *args],
+                              cwd=self.tmp, env=dict(self.env, FAKE_MODE=mode, **extra_env),
+                              stderr=subprocess.PIPE, text=True, timeout=60)
+
+    def test_a_stdout_closed_at_startup_does_not_skip_the_cleanup(self):
+        # sys.stdout is None; flushing it must not raise past the cleanup. Exit 255 is the case
+        # that matters: the remote claude must still be stopped.
+        r = self.run_with_closed_stdout("me@host", "x", mode="exit5")
+        self.assertEqual(r.returncode, 5, r.stderr)
+        self.assertEqual(self.ssh_calls(), 3, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        r = self.run_with_closed_stdout("-v", "-t", "60", "me@host", "x", mode="sleep", FAKE_SSH_DROP="runbanner")
+        self.assertEqual(r.returncode, 255, r.stderr)
+        self.assertIn("remote process tree signalled", r.stderr)
+        self.assertGone(self.grandchild_pid(), "grandchild")
+
+    def test_a_reply_that_cannot_be_written_does_not_skip_the_cleanup(self):
+        # Here the print itself fails, before any flush: a long reply on a pipe nobody reads, or
+        # an encoding stdout cannot represent. The cleanup of the failed run must still happen.
+        r_fd, w_fd = os.pipe()
+        os.close(r_fd)
+        try:
+            r = subprocess.run([sys.executable, "-I", "-B", SCRIPT, "me@host", "x"], cwd=self.tmp,
+                               env=dict(self.env, FAKE_MODE="big5"), stdout=w_fd,
+                               stderr=subprocess.PIPE, text=True, timeout=60)
+        finally:
+            os.close(w_fd)
+        self.assertIn("BrokenPipeError", r.stderr)
+        self.assertEqual(self.ssh_calls(), 3, r.stderr)
+        open(self.env["FAKE_SSH_LOG"], "w").close()
+        wrapper = ("import runpy, sys; sys.stdout.reconfigure(encoding='ascii', errors='strict'); "
+                   "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, "me@host", "x"], cwd=self.tmp,
+                           env=dict(self.env, FAKE_MODE="uni5"), capture_output=True, text=True, timeout=60)
+        self.assertIn("UnicodeEncodeError", r.stderr)
+        self.assertEqual(self.ssh_calls(), 3, r.stderr)
 
     def test_a_closed_stdout_does_not_skip_the_cleanup_of_a_failed_run(self):
         # The reply is flushed before the cleanup connection; when nobody reads it any more that

@@ -560,70 +560,71 @@ def main():
         clean_up_after_failure()
         sys.exit(rc)
 
-    def finish(code):
-        """Leave with `code`. Output has arrived (a login banner, part of a reply, a whole one) and
-        the command still failed: show it first and clean up last, because the cleanup is another
-        connection that can be slow, or never finish if the link is down."""
-        if rc != 0:
-            with contextlib.suppress(OSError, ValueError):      # a closed stdout must not skip the cleanup
-                sys.stdout.flush()
-            clean_up_after_failure()
-        sys.exit(code)
+    # From here on a reply, or part of one, has arrived. If the command still failed: show what
+    # there is first and clean up last, because the cleanup is another connection that can be
+    # slow, or never finish if the link is down; and clean up whatever happens to the printing
+    # (a closed or full stdout, an encoding it cannot represent).
+    try:
+        if not stdout.strip():
+            # Only exit 0 gets here: the remote command succeeded and said nothing.
+            log("the remote command exited 0 but printed nothing"
+                + (f": {stderr.strip()}" if stderr.strip() else ""))
+            sys.exit(1)
 
-    if not stdout.strip():
-        # Only exit 0 gets here: the remote command succeeded and said nothing.
-        log("the remote command exited 0 but printed nothing"
-            + (f": {stderr.strip()}" if stderr.strip() else ""))
-        sys.exit(1)
+        parsed = try_parse_result(stdout)
+        if not parsed:
+            log("warning: could not parse JSON, raw output follows")
+            print(reply_text(stdout))
+            if rc != 0:
+                log(f"remote command exited {rc}")
+                if stderr.strip() and not args.verbose:  # -v already showed it
+                    log(f"remote stderr:\n{stderr.strip()}")
+                explain_exit(rc)
+                sys.exit(rc)
+            return
 
-    parsed = try_parse_result(stdout)
-    if not parsed:
-        log("warning: could not parse JSON, raw output follows")
-        print(reply_text(stdout))
+        sid = parsed.get("session_id")
+        if not isinstance(sid, str) or not SESSION_RE.fullmatch(sid):
+            sid = None
+        result = parsed.get("result", parsed.get("text", ""))
+        if result is None:
+            result = ""
+        # Claude Code's failure results (e.g. subtype "error_max_turns") have no "result" text
+        # and may not set is_error, so the subtype counts too.
+        subtype = parsed.get("subtype")
+        subtype = subtype if isinstance(subtype, str) else ""
+        is_error = bool(parsed.get("is_error")) or subtype.startswith("error")
+        cost = parsed.get("cost_usd", parsed.get("total_cost_usd"))
+        turns = parsed.get("num_turns")
+        duration = parsed.get("duration_ms")
+
+        # Metadata to stderr, response text to stdout
+        if sid:
+            log(f"session_id: {sid}")
+            log(f"continue: {continue_command(args, sid)}")
+        if isinstance(cost, (int, float)):
+            try:
+                d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
+                err = " ERROR" if is_error else ""
+                log(f"cost=${cost:.4f} turns={turns if isinstance(turns, int) else '?'} time={d}{err}")
+            except OverflowError:   # an integer too big for a float: the reply is not ours to trust
+                log("cost/time not shown: numbers in the reply are out of range")
+
+        print(reply_text(str(result)))
+        if is_error:
+            log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
+            sys.exit(1)
         if rc != 0:
+            # A valid result line does not make a failed command a success (e.g. the remote
+            # shell was killed after claude printed it).
             log(f"remote command exited {rc}")
-            if stderr.strip() and not args.verbose:  # -v already showed it
-                log(f"remote stderr:\n{stderr.strip()}")
-            explain_exit(rc)
-            finish(rc)
-        return
-
-    sid = parsed.get("session_id")
-    if not isinstance(sid, str) or not SESSION_RE.fullmatch(sid):
-        sid = None
-    result = parsed.get("result", parsed.get("text", ""))
-    if result is None:
-        result = ""
-    # Claude Code's failure results (e.g. subtype "error_max_turns") have no "result" text
-    # and may not set is_error, so the subtype counts too.
-    subtype = parsed.get("subtype")
-    subtype = subtype if isinstance(subtype, str) else ""
-    is_error = bool(parsed.get("is_error")) or subtype.startswith("error")
-    cost = parsed.get("cost_usd", parsed.get("total_cost_usd"))
-    turns = parsed.get("num_turns")
-    duration = parsed.get("duration_ms")
-
-    # Metadata to stderr, response text to stdout
-    if sid:
-        log(f"session_id: {sid}")
-        log(f"continue: {continue_command(args, sid)}")
-    if isinstance(cost, (int, float)):
-        try:
-            d = f"{duration / 1000:.1f}s" if isinstance(duration, (int, float)) and duration else "?"
-            err = " ERROR" if is_error else ""
-            log(f"cost=${cost:.4f} turns={turns if isinstance(turns, int) else '?'} time={d}{err}")
-        except OverflowError:   # an integer too big for a float: the reply is not ours to trust
-            log("cost/time not shown: numbers in the reply are out of range")
-
-    print(reply_text(str(result)))
-    if is_error:
-        log(f"remote claude reported an error ({sanitize(subtype) or 'unknown'})")
-        finish(1)
-    if rc != 0:
-        # A valid result line does not make a failed command a success (e.g. the remote
-        # shell was killed after claude printed it).
-        log(f"remote command exited {rc}")
-        finish(rc)
+            sys.exit(rc)
+    finally:
+        if rc != 0:
+            if sys.stdout is not None:      # None when it was closed at startup
+                with contextlib.suppress(OSError, ValueError):
+                    sys.stdout.flush()
+            clean_up_after_failure()
 
 
 if __name__ == "__main__":
