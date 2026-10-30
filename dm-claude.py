@@ -351,7 +351,7 @@ def kill_remote(target, run_dir):
     """Stop the remote run and say truthfully what happened."""
     status = remote_cleanup(target, run_dir, kill=True)
     if status is None:
-        log(f"could not confirm remote cleanup; check {target} for a running claude")
+        log(f"could not confirm remote cleanup; check {target} for a running claude and for {run_dir}")
     elif "killed" not in status:
         log("no live pid recorded on the remote (claude may already have exited); temp files removed")
     elif "no-pgrep" in status:
@@ -555,7 +555,7 @@ def main():
             remove_remote_leftovers(target, run_dir)
 
     if rc != 0 and not stdout.strip():
-        log(f"FAILED (exit {rc}): {stderr.strip()}")
+        log(f"FAILED (exit {rc})" + (f": {stderr.strip()}" if stderr.strip() else " with no error output"))
         explain_exit(rc)
         clean_up_after_failure()
         sys.exit(rc)

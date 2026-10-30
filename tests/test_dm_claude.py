@@ -326,6 +326,7 @@ class KillRemoteTests(unittest.TestCase):
 
     def test_message_matches_the_outcome(self):
         self.assertIn("could not confirm", self.say(None))
+        self.assertIn("/tmp/dm-claude-x", self.say(None))       # where to look when the link is down
         self.assertIn("no live pid recorded", self.say({"no-pid"}))
         self.assertIn("only the top-level remote shell", self.say({"killed", "no-pgrep"}))
         self.assertIn("remote process tree signalled", self.say({"killed"}))
@@ -425,6 +426,7 @@ case "$FAKE_MODE" in
   exit5) printf '%s\\n' '{"type":"result","session_id":"abc123","result":"printed first"}'; exit 5 ;;
   big5)  printf '{"type":"result","session_id":"abc123","result":"'; head -c 200000 /dev/zero | tr '\\0' x; printf '"}\\n'; exit 5 ;;
   uni5)  printf '%s\\n' '{"type":"result","session_id":"abc123","result":"caf\\u00e9 \\u4e2d"}'; exit 5 ;;
+  quiet7) exit 7 ;;
   errexit) printf '%s\\n' '{"type":"result","is_error":true,"subtype":"error_during_execution","result":"boom"}'; exit 3 ;;
   slowok) echo $$ > "$FAKE_STATE/claude.pid"; sleep 3
           printf '{"type":"result","session_id":"abc123","result":"survived %s"}\\n' "$last" ;;
@@ -916,6 +918,39 @@ esac
                 self.assertEqual(self.ssh_calls(), calls, r.stderr)
                 self.logged_run_dirs()
 
+    def test_a_run_whose_remote_command_succeeded_makes_no_cleanup_connection(self):
+        # An error result (is_error, error_max_turns) and empty output exit 1, but the remote
+        # command's own status was 0: nothing is left over there, so there is no second
+        # connection. (The README says so; the control is the failing run above.)
+        for mode in ("maxturns", "err", "silent"):
+            with self.subTest(mode=mode):
+                open(self.env["FAKE_SSH_LOG"], "w").close()
+                r = self.run_script("me@host", "x", mode=mode)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertEqual(self.ssh_calls(), 2, r.stderr)
+
+    def test_a_silent_failure_says_so(self):
+        r = self.run_script("me@host", "x", mode="quiet7")
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn("FAILED (exit 7) with no error output", r.stderr)
+
+    def test_a_cleanup_that_fails_after_an_upload_timeout_or_interrupt_says_where_the_prompt_is(self):
+        # The upload paths that are hardest to reach for real: the 60 s limit and Ctrl-C while
+        # the upload runs. The cleanup that follows fails too; the log must say where the prompt is.
+        for exc, expected in ((subprocess.TimeoutExpired("ssh", 60), 1), (KeyboardInterrupt(), 130)):
+            with self.subTest(exc=type(exc).__name__):
+                run_id = uuid.uuid4().hex
+
+                def spy(cmd, *a, **kw):
+                    raise exc
+
+                with mock.patch.object(dmc.subprocess, "run", spy), \
+                        mock.patch.object(dmc, "remote_cleanup", return_value=None):
+                    code, err = self._in_process_main(run_id, "me@host", "hi")
+                self.assertEqual(code, expected, err)
+                self.assertIn(f"could not confirm the remote cleanup; the prompt may still be in "
+                              f"me@host:/tmp/dm-claude-{run_id}", err)
+
     def run_with_closed_stdout(self, *args, mode, **extra_env):
         """`script ... >&-`: Python starts with no stdout at all (sys.stdout is None)."""
         return subprocess.run(["/bin/sh", "-c", 'exec "$@" >&-', "sh", sys.executable, "-I", "-B", SCRIPT, *args],
@@ -953,6 +988,13 @@ esac
         r = subprocess.run([sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, "me@host", "x"], cwd=self.tmp,
                            env=dict(self.env, FAKE_MODE="uni5"), capture_output=True, text=True, timeout=60)
         self.assertIn("UnicodeEncodeError", r.stderr)
+        self.assertEqual(self.ssh_calls(), 3, r.stderr)
+        open(self.env["FAKE_SSH_LOG"], "w").close()
+        wrapper = ("import runpy, sys; sys.stdout.close(); "
+                   "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", wrapper, SCRIPT, "me@host", "x"], cwd=self.tmp,
+                           env=dict(self.env, FAKE_MODE="exit5"), stderr=subprocess.PIPE, text=True, timeout=60)
+        self.assertIn("ValueError", r.stderr)               # print() on a closed file, then the flush
         self.assertEqual(self.ssh_calls(), 3, r.stderr)
 
     def test_a_closed_stdout_does_not_skip_the_cleanup_of_a_failed_run(self):
